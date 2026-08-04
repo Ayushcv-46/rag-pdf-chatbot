@@ -21,7 +21,7 @@ load_dotenv()
 
 # Build NVIDIA API setup
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
-NVIDIA_MODEL = "meta/llama-3.3-70b-instruct"
+NVIDIA_MODEL = "openai/gpt-oss-20b"
 
 if not NVIDIA_API_KEY:
     raise ValueError("NVIDIA_API_KEY not found in .env file")
@@ -34,7 +34,10 @@ openai_utils.CHAT_MODELS[NVIDIA_MODEL] = 128000
 Settings.llm = OpenAI(
     model=NVIDIA_MODEL,
     api_key=NVIDIA_API_KEY,
-    api_base="https://integrate.api.nvidia.com/v1"
+    api_base="https://integrate.api.nvidia.com/v1",
+    temperature=1.0,
+    max_tokens=4096,
+    additional_kwargs={"top_p": 1}
 )
 Settings.embed_model = HuggingFaceEmbedding(model_name="sentence-transformers/all-MiniLM-L6-v2")
 

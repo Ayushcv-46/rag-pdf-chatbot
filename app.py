@@ -12,16 +12,14 @@ from llama_index.core import (
 )
 from llama_index.vector_stores.chroma import ChromaVectorStore
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
-from llama_index.llms.gemini import Gemini
+from llama_index.llms.openai import OpenAI
+import llama_index.llms.openai.utils as openai_utils
 
 # ======================================================
 # LOAD ENV VARIABLES
 # ======================================================
 load_dotenv()
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-
-if not GOOGLE_API_KEY:
-    raise ValueError("GOOGLE_API_KEY not found in .env file")
+NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
 
 # ======================================================
 # STREAMLIT PAGE CONFIG
@@ -31,14 +29,28 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("📚 Multi-Doc RAG Chatbot with Gemini")
+st.title("📚 Multi-Doc RAG Chatbot with NVIDIA AI")
 st.caption("Upload multiple PDFs and query across your entire knowledge base simultaneously.")
+
+if not NVIDIA_API_KEY:
+    st.error("⚠️ `NVIDIA_API_KEY` not found in `.env` file! Please add `NVIDIA_API_KEY=your_key_here` inside `.env`.")
+    st.stop()
 
 # ======================================================
 # CONFIGURATION (LLM, EMBEDDINGS, CHUNKING)
 # ======================================================
-os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY
-Settings.llm = Gemini(model="models/gemini-2.5-flash")
+NVIDIA_MODEL = "openai/gpt-oss-20b"
+openai_utils.ALL_AVAILABLE_MODELS[NVIDIA_MODEL] = 128000
+openai_utils.CHAT_MODELS[NVIDIA_MODEL] = 128000
+
+Settings.llm = OpenAI(
+    model=NVIDIA_MODEL,
+    api_key=NVIDIA_API_KEY,
+    api_base="https://integrate.api.nvidia.com/v1",
+    temperature=1.0,
+    max_tokens=4096,
+    additional_kwargs={"top_p": 1}
+)
 Settings.embed_model = HuggingFaceEmbedding(model_name="sentence-transformers/all-MiniLM-L6-v2")
 Settings.chunk_size = 512
 Settings.chunk_overlap = 50

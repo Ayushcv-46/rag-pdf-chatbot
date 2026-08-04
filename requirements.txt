@@ -1,10 +1,11 @@
 streamlit
 chromadb
 llama-index
-llama-index-llms-gemini
+llama-index-llms-openai
 llama-index-embeddings-huggingface
 llama-index-vector-stores-chroma
 llama-index-readers-file
 pymupdf
 python-dotenv
 sentence-transformers
+openai
