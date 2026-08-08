@@ -17,7 +17,7 @@ import llama_index.llms.openai.utils as openai_utils
 from llama_index.retrievers.bm25 import BM25Retriever
 from llama_index.core.retrievers import QueryFusionRetriever
 from llama_index.core.query_engine import RetrieverQueryEngine
-
+from llama_index.core.postprocessor import SentenceTransformerRerank
 # ======================================================
 # LOAD ENV VARIABLES
 # ======================================================
@@ -57,6 +57,11 @@ Settings.llm = OpenAI(
 Settings.embed_model = HuggingFaceEmbedding(model_name="sentence-transformers/all-MiniLM-L6-v2")
 Settings.chunk_size = 512
 Settings.chunk_overlap = 50
+
+reranker = SentenceTransformerRerank(
+    model="BAAI/bge-reranker-base",
+    top_n=5,
+)
 
 # ======================================================
 # CHROMADB SETUP
@@ -110,12 +115,12 @@ def build_fusion_query_engine(index):
     nodes = list(index.docstore.docs.values())
     print(f"[DEBUG] Nodes found in docstore: {len(nodes)}")
 
-    vector_retriever = index.as_retriever(similarity_top_k=5)
-    bm25_retriever = BM25Retriever.from_defaults(nodes=nodes, similarity_top_k=5)
+    vector_retriever = index.as_retriever(similarity_top_k=15)
+    bm25_retriever = BM25Retriever.from_defaults(nodes=nodes, similarity_top_k=15)
 
     fusion_retriever = QueryFusionRetriever(
         retrievers=[vector_retriever, bm25_retriever],
-        similarity_top_k=5,
+        similarity_top_k=15,
         num_queries=1,          # skip query-rewriting for now, just fuse the two retrievers
         mode="reciprocal_rerank",
         use_async=False,
@@ -123,6 +128,7 @@ def build_fusion_query_engine(index):
 
     return RetrieverQueryEngine.from_args(
         fusion_retriever,
+        node_postprocessors=[reranker],
         text_qa_template=qa_prompt,
         response_mode="compact",
     )
@@ -218,6 +224,8 @@ if question:
 
     # Query Execution
     response = query_engine.query(question)
+    for i, node in enumerate(response.source_nodes):
+        print(i, node.score, node.metadata.get('source_file'), node.text[:80])
     answer = response.response
 
     with st.chat_message("assistant"):
