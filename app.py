@@ -14,6 +14,9 @@ from llama_index.vector_stores.chroma import ChromaVectorStore
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.llms.openai import OpenAI
 import llama_index.llms.openai.utils as openai_utils
+from llama_index.retrievers.bm25 import BM25Retriever
+from llama_index.core.retrievers import QueryFusionRetriever
+from llama_index.core.query_engine import RetrieverQueryEngine
 
 # ======================================================
 # LOAD ENV VARIABLES
@@ -63,6 +66,12 @@ chroma_collection = db.get_or_create_collection("pdf_collection")
 vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
 storage_context = StorageContext.from_defaults(vector_store=vector_store)
 
+def clear_chroma_collection():
+    existing_ids = chroma_collection.get(include=[]).get("ids", [])
+    if existing_ids:
+        chroma_collection.delete(ids=existing_ids)
+        print(f"[DEBUG] Cleared {len(existing_ids)} existing Chroma chunks before re-indexing.")
+
 # ======================================================
 # LOAD INDEX FUNCTION
 # ======================================================
@@ -87,11 +96,36 @@ def load_index():
     if not documents:
         return None
 
+    clear_chroma_collection()
+
     index = VectorStoreIndex.from_documents(
         documents,
-        storage_context=storage_context
+        storage_context=storage_context,
+        store_nodes_override=True,
     )
     return index
+
+def build_fusion_query_engine(index):
+    """Combines vector search + BM25 keyword search using reciprocal rank fusion."""
+    nodes = list(index.docstore.docs.values())
+    print(f"[DEBUG] Nodes found in docstore: {len(nodes)}")
+
+    vector_retriever = index.as_retriever(similarity_top_k=5)
+    bm25_retriever = BM25Retriever.from_defaults(nodes=nodes, similarity_top_k=5)
+
+    fusion_retriever = QueryFusionRetriever(
+        retrievers=[vector_retriever, bm25_retriever],
+        similarity_top_k=5,
+        num_queries=1,          # skip query-rewriting for now, just fuse the two retrievers
+        mode="reciprocal_rerank",
+        use_async=False,
+    )
+
+    return RetrieverQueryEngine.from_args(
+        fusion_retriever,
+        text_qa_template=qa_prompt,
+        response_mode="compact",
+    )
 
 index = load_index()
 
@@ -117,11 +151,7 @@ Answer using ONLY the context above:"""
 
 query_engine = None
 if index is not None:
-    query_engine = index.as_query_engine(
-        similarity_top_k=5,
-        text_qa_template=qa_prompt,
-        response_mode="compact"
-    )
+    query_engine = build_fusion_query_engine(index)
 
 # ======================================================
 # MULTI-PDF UPLOAD UI
@@ -153,10 +183,7 @@ with st.sidebar:
             st.cache_resource.clear()  # Drop the single-doc cache
             index = load_index()       # Re-index all files together
             if index is not None:
-                query_engine = index.as_query_engine(
-                    similarity_top_k=5,
-                    text_qa_template=qa_prompt
-                )
+                query_engine = build_fusion_query_engine(index)
             st.rerun()
 
     # Show inventory of currently indexed documents

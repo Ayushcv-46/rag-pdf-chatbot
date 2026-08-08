@@ -9,3 +9,4 @@ pymupdf
 python-dotenv
 sentence-transformers
 openai
+llama-index-retrievers-bm25
