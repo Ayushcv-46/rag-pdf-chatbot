@@ -18,6 +18,8 @@ from llama_index.retrievers.bm25 import BM25Retriever
 from llama_index.core.retrievers import QueryFusionRetriever
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.postprocessor import SentenceTransformerRerank
+from llama_index.core.indices.query.query_transform import HyDEQueryTransform
+from llama_index.core.query_engine import TransformQueryEngine
 # ======================================================
 # LOAD ENV VARIABLES
 # ======================================================
@@ -126,18 +128,44 @@ def build_fusion_query_engine(index):
         use_async=False,
     )
 
-    return RetrieverQueryEngine.from_args(
+    debug_nodes = fusion_retriever.retrieve("in day 9 what topics we discuss?")
+    print(f"[DEBUG-RAW-RETRIEVAL] {len(debug_nodes)} nodes retrieved BEFORE reranking:")
+    for i, n in enumerate(debug_nodes):
+        print(f"  {i}: score={n.score:.4f} | file={n.metadata.get('source_file')} | text={n.text[:100].encode('ascii', errors='replace').decode('ascii')!r}")
+
+    reranked_debug = reranker.postprocess_nodes(debug_nodes, query_str="in day 9 what topics we discuss?")
+    print(f"[DEBUG-AFTER-RERANK] {len(reranked_debug)} nodes AFTER reranking:")
+    for i, n in enumerate(reranked_debug):
+        print(f"  {i}: score={n.score:.4f} | file={n.metadata.get('source_file')} | text={n.text[:100].encode('ascii', errors='replace').decode('ascii')!r}")
+
+    base_query_engine = RetrieverQueryEngine.from_args(
         fusion_retriever,
         node_postprocessors=[reranker],
         text_qa_template=qa_prompt,
         response_mode="compact",
     )
 
+    return TransformQueryEngine(base_query_engine, query_transform=hyde)
+
 index = load_index()
+
+if index is not None:
+    print("[DEBUG-DOCSTORE-SCAN] Searching all nodes for 'DAY 9':")
+    found_any = False
+    for node_id, node in index.docstore.docs.items():
+        if "DAY 9" in node.text or "Day 9" in node.text:
+            found_any = True
+            safe_text = node.text[:300].encode("ascii", errors="replace").decode("ascii")
+            print(f"  FOUND in node {node_id}:")
+            print(f"  {safe_text!r}")
+            print("  ---")
+    if not found_any:
+        print("  NOT FOUND in any node.")
 
 # ======================================================
 # CREATE QUERY ENGINE
 # ======================================================
+hyde = HyDEQueryTransform(include_original=True)
 qa_prompt = PromptTemplate(
     """You are an advanced multi-document assistant. You ONLY answer using the exact text provided below.
 Do NOT use any outside knowledge. Do NOT guess or infer beyond what is written.
@@ -164,6 +192,13 @@ if index is not None:
 # ======================================================
 with st.sidebar:
     st.header("📂 Document Management")
+    with st.expander("ðŸ”§ Retrieval Pipeline Details"):
+        st.markdown("""
+        - **Hybrid Search**: BM25 (keyword) + vector (semantic), fused via reciprocal rank
+        - **Reranking**: cross-encoder (`bge-reranker-base`) re-scores top-15 → top-5
+        - **HyDE**: generates a hypothetical answer to bridge question/answer phrasing gaps
+        """)
+
     # Added accept_multiple_files=True to allow batch uploads
     uploaded_files = st.file_uploader(
         "Upload your PDFs",
@@ -232,13 +267,25 @@ if question:
         st.write(answer)
         st.write("### 🔍 Citations & Sources")
 
+        print(f"[DEBUG-FINAL-SOURCE-NODES] {len(response.source_nodes)} nodes reaching the UI:")
+        for i, n in enumerate(response.source_nodes):
+            print(f"  {i}: score={n.score:.4f} | file={n.metadata.get('source_file')} | text={n.text[:100]!r}")
+
         bad_keywords = ["rdf:", "pdfSchema", "stream", "endstream", "<?xpacket"]
         seen_texts = set()
         source_count = 0
+        dropped_by_dedup = 0
+        dropped_by_bad_keywords = 0
 
         for node in response.source_nodes:
             text = node.text.strip()
-            if any(keyword in text for keyword in bad_keywords) or text in seen_texts:
+            has_bad_keyword = any(keyword in text for keyword in bad_keywords)
+            is_duplicate = text in seen_texts
+            if has_bad_keyword:
+                dropped_by_bad_keywords += 1
+            if is_duplicate:
+                dropped_by_dedup += 1
+            if has_bad_keyword or is_duplicate:
                 continue
             
             seen_texts.add(text)
@@ -250,6 +297,8 @@ if question:
             st.write(f"**Source {source_count}** | From: `{filename}`")
             st.write(text[:400] + "...")
             st.divider()
+
+        print(f"[DEBUG-CITATION-FILTERS] dropped_by_dedup={dropped_by_dedup} | dropped_by_bad_keywords={dropped_by_bad_keywords}")
 
         if source_count == 0:
             st.write("No clean text citations extracted for this response cycle.")

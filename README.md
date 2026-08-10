@@ -15,8 +15,9 @@ A production-ready Retrieval-Augmented Generation (RAG) web application built to
 
 - **Multi-PDF Knowledge Base:** Upload and index multiple PDF documents at once in the sidebar to query across your entire collective knowledge base.
 - **Semantic Search:** Utilizes open-source `sentence-transformers/all-MiniLM-L6-v2` embeddings and Cosine Similarity to retrieve the most contextually relevant information.
+- **Advanced Retrieval Pipeline:** Combines vector similarity search with BM25 keyword search (hybrid retrieval via reciprocal rank fusion), a cross-encoder reranker (`bge-reranker-base`), and HyDE (Hypothetical Document Embeddings) to bridge phrasing gaps between questions and source text.
 - **Source Tracking & Citations:** Every response provides strict citations, mapping extracted chunks directly to their origin file (e.g., `From: your_document.pdf`).
-- **Hallucination-Free Generation:** Powered by Gemini 2.5 Flash with strict prompt engineering to ensure the LLM only answers using the provided context.
+- **Grounded Generation with Measured Limits:** Powered by Gemini 2.5 Flash with strict prompt engineering to keep answers grounded in retrieved context — validated (and stress-tested) via a dedicated evaluation harness; see Evaluation Findings below for measured faithfulness under harder queries.
 - **Verified Reliability:** Pipeline performance is validated using an automated LLM-as-a-Judge script evaluating Faithfulness and Relevancy (powered by NVIDIA's LLaMA 3.3).
 
 ---
@@ -74,3 +75,18 @@ python eval.py
 ```
 
 *Note: Ensure you have populated your ChromaDB by uploading at least one PDF in the app before running the evaluator.*
+
+### Evaluation Findings
+
+| Eval Run | Faithfulness | Relevancy | Notes |
+| :--- | :---: | :---: | :--- |
+| Baseline (3 easy, general questions) | 1.00 | 1.00 | Saturated: questions were too easy to differentiate quality. |
+| Hard set v1: 10 targeted questions, original prompt | 0.60 | 1.00 | Revealed two failure modes: elaboration drift and meta-question misretrieval. |
+| Hard set v2: same 10 questions, anti-elaboration prompt | 0.20 | 1.00 | Prompt tightening did not fix faithfulness; scores became worse/noisier. |
+
+Standard evaluation on easy, general questions produced a saturated `1.00 / 1.00` score, which could not meaningfully distinguish system quality. A more targeted 10-question hard set, spanning paraphrased queries, day-specific lookups, and meta-questions about the system itself, reduced faithfulness to `0.60` and exposed two concrete failure modes:
+
+- The LLM sometimes elaborated beyond what was literally stated in the retrieved context.
+- Meta-questions about the system occasionally retrieved irrelevant chunks and were answered from general model knowledge instead of triggering the fallback response.
+
+Attempting to address elaboration with a stricter anti-elaboration prompt lowered faithfulness further to `0.20`, suggesting that prompt-level fixes alone are insufficient and that the LLM-as-judge faithfulness metric has some inherent sensitivity/noise. The likely next improvements are retrieval-level changes, such as smaller or day-boundary-aware chunking, plus stronger generation-time grounding rather than prompt wording alone.
