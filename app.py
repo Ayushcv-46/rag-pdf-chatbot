@@ -1,27 +1,24 @@
 import os
+import logging
 import streamlit as st
-import chromadb
-from llama_index.readers.file import PyMuPDFReader
 from dotenv import load_dotenv
 
-from llama_index.core import (
-    VectorStoreIndex,
-    StorageContext,
-    Settings,
-    PromptTemplate
+from core_rag import (
+    RAGIndexManager,
+    configure_settings,
+    build_fusion_query_engine,
+    compute_bytes_hash,
+    DEFAULT_DATA_DIR
 )
-from llama_index.vector_stores.chroma import ChromaVectorStore
-from llama_index.embeddings.huggingface import HuggingFaceEmbedding
-from llama_index.llms.openai import OpenAI
-import llama_index.llms.openai.utils as openai_utils
-from llama_index.retrievers.bm25 import BM25Retriever
-from llama_index.core.retrievers import QueryFusionRetriever
-from llama_index.core.query_engine import RetrieverQueryEngine
-from llama_index.core.postprocessor import SentenceTransformerRerank
-from llama_index.core.indices.query.query_transform import HyDEQueryTransform
-from llama_index.core.query_engine import TransformQueryEngine
+
 # ======================================================
-# LOAD ENV VARIABLES
+# LOGGING CONFIGURATION
+# ======================================================
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger("rag_pdf_chatbot")
+
+# ======================================================
+# LOAD ENV VARIABLES & EARLY KEY CHECK
 # ======================================================
 load_dotenv()
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
@@ -30,210 +27,447 @@ NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
 # STREAMLIT PAGE CONFIG
 # ======================================================
 st.set_page_config(
-    page_title="Multi-RAG PDF Chatbot",
-    layout="wide"
+    page_title="DocuMind — RAG PDF Chatbot",
+    page_icon="🧠",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-st.title("📚 Multi-Doc RAG Chatbot with NVIDIA AI")
-st.caption("Upload multiple PDFs and query across your entire knowledge base simultaneously.")
+# ======================================================
+# GLOBAL CSS — Dark Premium Design
+# ======================================================
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
 
+/* ── Root & Base ── */
+html, body, [data-testid="stAppViewContainer"] {
+    background: #0a0d14 !important;
+    font-family: 'Inter', sans-serif !important;
+}
+[data-testid="stAppViewContainer"] > .main {
+    background: #0a0d14 !important;
+}
+
+/* ── Sidebar ── */
+[data-testid="stSidebar"] {
+    background: linear-gradient(180deg, #0f1420 0%, #0c1018 100%) !important;
+    border-right: 1px solid rgba(99, 102, 241, 0.15) !important;
+}
+[data-testid="stSidebar"] * { font-family: 'Inter', sans-serif !important; }
+
+/* ── Hide default Streamlit chrome ── */
+#MainMenu, footer, header { visibility: hidden !important; }
+[data-testid="stDecoration"] { display: none !important; }
+
+/* ── Hero Banner ── */
+.hero-banner {
+    background: linear-gradient(135deg, #1a1f35 0%, #111827 50%, #0f172a 100%);
+    border: 1px solid rgba(99, 102, 241, 0.2);
+    border-radius: 20px;
+    padding: 36px 40px;
+    margin-bottom: 28px;
+    position: relative;
+    overflow: hidden;
+}
+.hero-banner::before {
+    content: '';
+    position: absolute;
+    top: -60px; left: -60px;
+    width: 240px; height: 240px;
+    background: radial-gradient(circle, rgba(99,102,241,0.18) 0%, transparent 70%);
+    pointer-events: none;
+}
+.hero-banner::after {
+    content: '';
+    position: absolute;
+    bottom: -60px; right: -60px;
+    width: 200px; height: 200px;
+    background: radial-gradient(circle, rgba(168,85,247,0.12) 0%, transparent 70%);
+    pointer-events: none;
+}
+.hero-title {
+    font-size: 2rem;
+    font-weight: 700;
+    background: linear-gradient(135deg, #a5b4fc 0%, #c084fc 50%, #818cf8 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    margin: 0 0 6px 0;
+    line-height: 1.2;
+}
+.hero-subtitle {
+    color: #94a3b8;
+    font-size: 0.95rem;
+    font-weight: 400;
+    margin: 0;
+    line-height: 1.5;
+}
+.hero-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: rgba(99,102,241,0.12);
+    border: 1px solid rgba(99,102,241,0.3);
+    color: #a5b4fc;
+    font-size: 0.75rem;
+    font-weight: 500;
+    padding: 4px 12px;
+    border-radius: 20px;
+    margin-bottom: 16px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+}
+
+/* ── Sidebar Header ── */
+.sidebar-logo {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 0 20px;
+    border-bottom: 1px solid rgba(99,102,241,0.15);
+    margin-bottom: 20px;
+}
+.sidebar-logo-text {
+    font-size: 1.1rem;
+    font-weight: 700;
+    background: linear-gradient(135deg, #a5b4fc, #c084fc);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+.sidebar-section-title {
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: #6366f1;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin: 20px 0 10px;
+}
+
+/* ── Pill Chips ── */
+.pipeline-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: rgba(99,102,241,0.08);
+    border: 1px solid rgba(99,102,241,0.2);
+    color: #c7d2fe;
+    font-size: 0.78rem;
+    padding: 5px 12px;
+    border-radius: 6px;
+    margin: 3px 0;
+    width: 100%;
+}
+.chip-icon { color: #818cf8; }
+
+/* ── File cards in sidebar ── */
+.file-card {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: rgba(99,102,241,0.07);
+    border: 1px solid rgba(99,102,241,0.15);
+    border-radius: 10px;
+    padding: 8px 12px;
+    margin: 4px 0;
+}
+.file-card-icon { font-size: 1rem; }
+.file-card-name {
+    color: #e2e8f0;
+    font-size: 0.8rem;
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex-grow: 1;
+}
+
+/* ── Upload zone ── */
+[data-testid="stFileUploader"] {
+    background: rgba(99,102,241,0.04) !important;
+    border: 1.5px dashed rgba(99,102,241,0.3) !important;
+    border-radius: 14px !important;
+    padding: 8px !important;
+    transition: border-color 0.2s ease !important;
+}
+[data-testid="stFileUploader"]:hover {
+    border-color: rgba(99,102,241,0.6) !important;
+    background: rgba(99,102,241,0.08) !important;
+}
+[data-testid="stFileUploader"] label {
+    color: #94a3b8 !important;
+    font-size: 0.85rem !important;
+}
+
+/* ── Chat input ── */
+[data-testid="stChatInput"] {
+    background: #131b2e !important;
+    border: 1.5px solid rgba(99,102,241,0.3) !important;
+    border-radius: 16px !important;
+    color: #e2e8f0 !important;
+    font-family: 'Inter', sans-serif !important;
+    transition: border-color 0.2s ease !important;
+}
+[data-testid="stChatInput"]:focus-within {
+    border-color: rgba(99,102,241,0.7) !important;
+    box-shadow: 0 0 0 3px rgba(99,102,241,0.1) !important;
+}
+[data-testid="stChatInput"] textarea {
+    color: #e2e8f0 !important;
+    background: transparent !important;
+}
+[data-testid="stChatInput"] textarea::placeholder { color: #475569 !important; }
+
+/* ── Citation cards ── */
+.citation-card {
+    background: linear-gradient(135deg, #0f172a 0%, #131d33 100%);
+    border: 1px solid rgba(99,102,241,0.2);
+    border-left: 3px solid #6366f1;
+    border-radius: 12px;
+    padding: 16px 20px;
+    margin: 10px 0;
+    font-size: 0.85rem;
+    color: #94a3b8;
+    line-height: 1.6;
+}
+.citation-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+    flex-wrap: wrap;
+}
+.citation-badge {
+    background: rgba(99,102,241,0.15);
+    border: 1px solid rgba(99,102,241,0.3);
+    color: #a5b4fc;
+    font-size: 0.7rem;
+    font-weight: 600;
+    padding: 2px 10px;
+    border-radius: 20px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+.citation-filename {
+    background: rgba(15,23,42,0.8);
+    border: 1px solid rgba(99,102,241,0.2);
+    color: #818cf8;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.75rem;
+    padding: 2px 10px;
+    border-radius: 6px;
+}
+.citation-score {
+    margin-left: auto;
+    color: #475569;
+    font-size: 0.72rem;
+    font-family: 'JetBrains Mono', monospace;
+}
+.citation-text {
+    color: #94a3b8;
+    font-size: 0.83rem;
+    line-height: 1.65;
+    margin: 0;
+}
+
+/* ── Section dividers ── */
+.section-divider {
+    border: none;
+    border-top: 1px solid rgba(99,102,241,0.12);
+    margin: 20px 0;
+}
+
+/* ── Empty state ── */
+.empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 60px 40px;
+    text-align: center;
+    gap: 12px;
+}
+.empty-icon { font-size: 3.5rem; margin-bottom: 8px; }
+.empty-title { color: #e2e8f0; font-size: 1.1rem; font-weight: 600; margin: 0; }
+.empty-sub   { color: #475569; font-size: 0.88rem; margin: 0; line-height: 1.5; }
+
+/* ── Status dot ── */
+.status-dot {
+    width: 8px; height: 8px;
+    background: #22c55e;
+    border-radius: 50%;
+    display: inline-block;
+    margin-right: 6px;
+    box-shadow: 0 0 6px rgba(34,197,94,0.5);
+    animation: blink 2s infinite;
+}
+.status-offline {
+    background: #ef4444 !important;
+    box-shadow: 0 0 6px rgba(239,68,68,0.5) !important;
+    animation: none !important;
+}
+@keyframes blink {
+    0%,100% { opacity: 1; }
+    50%      { opacity: 0.45; }
+}
+</style>
+""", unsafe_allow_html=True)
+
+# ======================================================
+# API KEY VALIDATION
+# ======================================================
 if not NVIDIA_API_KEY:
-    st.error("⚠️ `NVIDIA_API_KEY` not found in `.env` file! Please add `NVIDIA_API_KEY=your_key_here` inside `.env`.")
+    st.error("⚠️ `NVIDIA_API_KEY` not found in environment or `.env` file! Please configure `NVIDIA_API_KEY=your_key_here` to use the chatbot.")
     st.stop()
 
-# ======================================================
-# CONFIGURATION (LLM, EMBEDDINGS, CHUNKING)
-# ======================================================
-NVIDIA_MODEL = "openai/gpt-oss-20b"
-openai_utils.ALL_AVAILABLE_MODELS[NVIDIA_MODEL] = 128000
-openai_utils.CHAT_MODELS[NVIDIA_MODEL] = 128000
+# Configure LLM & embedding settings with verified key
+configure_settings(api_key=NVIDIA_API_KEY)
 
-Settings.llm = OpenAI(
-    model=NVIDIA_MODEL,
-    api_key=NVIDIA_API_KEY,
-    api_base="https://integrate.api.nvidia.com/v1",
-    temperature=1.0,
-    max_tokens=4096,
-    additional_kwargs={"top_p": 1}
-)
-Settings.embed_model = HuggingFaceEmbedding(model_name="sentence-transformers/all-MiniLM-L6-v2")
-Settings.chunk_size = 512
-Settings.chunk_overlap = 50
-
-reranker = SentenceTransformerRerank(
-    model="BAAI/bge-reranker-base",
-    top_n=5,
-)
 
 # ======================================================
-# CHROMADB SETUP
+# CACHED ENGINE LOADER
 # ======================================================
-db = chromadb.PersistentClient(path="./chroma_db")
-chroma_collection = db.get_or_create_collection("pdf_collection")
-vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
-storage_context = StorageContext.from_defaults(vector_store=vector_store)
-
-def clear_chroma_collection():
-    existing_ids = chroma_collection.get(include=[]).get("ids", [])
-    if existing_ids:
-        chroma_collection.delete(ids=existing_ids)
-        print(f"[DEBUG] Cleared {len(existing_ids)} existing Chroma chunks before re-indexing.")
-
-# ======================================================
-# LOAD INDEX FUNCTION
-# ======================================================
-
 @st.cache_resource
-def load_index():
-    if not os.path.exists("./data") or len(os.listdir("./data")) == 0:
+def get_cached_query_engine():
+    """Load or restore the persistent index and return the fusion query engine."""
+    manager = RAGIndexManager()
+    index = manager.sync_index()
+    if index is None:
+        return None
+    try:
+        return build_fusion_query_engine(index)
+    except Exception as e:
+        logger.error(f"Error building query engine: {e}")
         return None
 
-    loader = PyMuPDFReader()
-    documents = []
 
-    # Iterate and parse every single PDF inside the data folder
-    for file in os.listdir("./data"):
-        if file.endswith(".pdf"):
-            docs = loader.load(file_path=os.path.join("./data", file))
-            # Tag each document chunk with its original filename for better traceability
-            for doc in docs:
-                doc.metadata["source_file"] = file
-            documents.extend(docs)
-
-    if not documents:
-        return None
-
-    clear_chroma_collection()
-
-    index = VectorStoreIndex.from_documents(
-        documents,
-        storage_context=storage_context,
-        store_nodes_override=True,
-    )
-    return index
-
-def build_fusion_query_engine(index):
-    """Combines vector search + BM25 keyword search using reciprocal rank fusion."""
-    nodes = list(index.docstore.docs.values())
-    print(f"[DEBUG] Nodes found in docstore: {len(nodes)}")
-
-    vector_retriever = index.as_retriever(similarity_top_k=15)
-    bm25_retriever = BM25Retriever.from_defaults(nodes=nodes, similarity_top_k=15)
-
-    fusion_retriever = QueryFusionRetriever(
-        retrievers=[vector_retriever, bm25_retriever],
-        similarity_top_k=15,
-        num_queries=1,          # skip query-rewriting for now, just fuse the two retrievers
-        mode="reciprocal_rerank",
-        use_async=False,
-    )
-
-    debug_nodes = fusion_retriever.retrieve("in day 9 what topics we discuss?")
-    print(f"[DEBUG-RAW-RETRIEVAL] {len(debug_nodes)} nodes retrieved BEFORE reranking:")
-    for i, n in enumerate(debug_nodes):
-        print(f"  {i}: score={n.score:.4f} | file={n.metadata.get('source_file')} | text={n.text[:100].encode('ascii', errors='replace').decode('ascii')!r}")
-
-    reranked_debug = reranker.postprocess_nodes(debug_nodes, query_str="in day 9 what topics we discuss?")
-    print(f"[DEBUG-AFTER-RERANK] {len(reranked_debug)} nodes AFTER reranking:")
-    for i, n in enumerate(reranked_debug):
-        print(f"  {i}: score={n.score:.4f} | file={n.metadata.get('source_file')} | text={n.text[:100].encode('ascii', errors='replace').decode('ascii')!r}")
-
-    base_query_engine = RetrieverQueryEngine.from_args(
-        fusion_retriever,
-        node_postprocessors=[reranker],
-        text_qa_template=qa_prompt,
-        response_mode="compact",
-    )
-
-    return TransformQueryEngine(base_query_engine, query_transform=hyde)
-
-index = load_index()
-
-if index is not None:
-    print("[DEBUG-DOCSTORE-SCAN] Searching all nodes for 'DAY 9':")
-    found_any = False
-    for node_id, node in index.docstore.docs.items():
-        if "DAY 9" in node.text or "Day 9" in node.text:
-            found_any = True
-            safe_text = node.text[:300].encode("ascii", errors="replace").decode("ascii")
-            print(f"  FOUND in node {node_id}:")
-            print(f"  {safe_text!r}")
-            print("  ---")
-    if not found_any:
-        print("  NOT FOUND in any node.")
+query_engine = get_cached_query_engine()
 
 # ======================================================
-# CREATE QUERY ENGINE
-# ======================================================
-hyde = HyDEQueryTransform(include_original=True)
-qa_prompt = PromptTemplate(
-    """You are an advanced multi-document assistant. You ONLY answer using the exact text provided below.
-Do NOT use any outside knowledge. Do NOT guess or infer beyond what is written.
-
-If the answer is not explicitly stated in the context below, respond with:
-"I could not find that information across the uploaded documents."
-
----------------------
-DOCUMENT CONTEXT:
-{context_str}
----------------------
-
-Question: {query_str}
-
-Answer using ONLY the context above:"""
-)
-
-query_engine = None
-if index is not None:
-    query_engine = build_fusion_query_engine(index)
-
-# ======================================================
-# MULTI-PDF UPLOAD UI
+# SIDEBAR
 # ======================================================
 with st.sidebar:
-    st.header("📂 Document Management")
-    with st.expander("ðŸ”§ Retrieval Pipeline Details"):
-        st.markdown("""
-        - **Hybrid Search**: BM25 (keyword) + vector (semantic), fused via reciprocal rank
-        - **Reranking**: cross-encoder (`bge-reranker-base`) re-scores top-15 → top-5
-        - **HyDE**: generates a hypothetical answer to bridge question/answer phrasing gaps
-        """)
+    st.markdown("""
+    <div class="sidebar-logo">
+        <span style="font-size:1.6rem;">🧠</span>
+        <span class="sidebar-logo-text">DocuMind</span>
+    </div>
+    """, unsafe_allow_html=True)
 
-    # Added accept_multiple_files=True to allow batch uploads
+    is_ready = query_engine is not None
+    dot_class = "status-dot" if is_ready else "status-dot status-offline"
+    status_label = "Index Ready" if is_ready else "No Documents"
+    st.markdown(f"""
+    <div style="display:flex;align-items:center;margin-bottom:18px;">
+        <span class="{dot_class}"></span>
+        <span style="color:#64748b;font-size:0.8rem;font-weight:500;">{status_label}</span>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Upload zone
+    st.markdown('<div class="sidebar-section-title">📂 Upload Documents</div>', unsafe_allow_html=True)
     uploaded_files = st.file_uploader(
-        "Upload your PDFs",
+        "Drop PDFs here",
         type=["pdf"],
-        accept_multiple_files=True
+        accept_multiple_files=True,
+        label_visibility="collapsed"
     )
 
     if uploaded_files:
-        os.makedirs("data", exist_ok=True)
-        new_files_added = False
+        os.makedirs(DEFAULT_DATA_DIR, exist_ok=True)
+        files_updated = False
 
         for uploaded_file in uploaded_files:
-            file_path = os.path.join("data", uploaded_file.name)
-            
-            # Save file only if it doesn't already exist to avoid repetitive I/O operations
+            file_path = os.path.join(DEFAULT_DATA_DIR, uploaded_file.name)
+            uploaded_bytes = uploaded_file.getbuffer().tobytes()
+
+            # Detect new or modified content
+            should_write = False
             if not os.path.exists(file_path):
-                with open(file_path, "wb") as f:
-                    f.write(uploaded_file.getbuffer())
-                new_files_added = True
+                should_write = True
+            else:
+                try:
+                    with open(file_path, "rb") as f:
+                        disk_bytes = f.read()
+                    if compute_bytes_hash(disk_bytes) != compute_bytes_hash(uploaded_bytes):
+                        should_write = True
+                except Exception:
+                    should_write = True
 
-        if new_files_added:
-            st.success("New PDFs processed successfully!")
-            st.cache_resource.clear()  # Drop the single-doc cache
-            index = load_index()       # Re-index all files together
-            if index is not None:
-                query_engine = build_fusion_query_engine(index)
-            st.rerun()
+            if should_write:
+                try:
+                    with open(file_path, "wb") as f:
+                        f.write(uploaded_bytes)
+                    files_updated = True
+                except Exception as e:
+                    st.error(f"Failed to save {uploaded_file.name}: {e}")
 
-    # Show inventory of currently indexed documents
-    if os.path.exists("./data") and len(os.listdir("./data")) > 0:
-        st.markdown("---")
-        st.markdown("**Currently Indexed Files:**")
-        for f in os.listdir("./data"):
-            if f.endswith(".pdf"):
-                st.caption(f"📄 {f}")
+        if files_updated:
+            with st.spinner("Indexing documents…"):
+                try:
+                    manager = RAGIndexManager()
+                    manager.sync_index()
+                    st.cache_resource.clear()
+                    st.success("✅ Documents indexed successfully!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"❌ Indexing failed: {e}")
+
+    # Indexed Files List with Removal
+    if os.path.exists(DEFAULT_DATA_DIR):
+        pdfs = [f for f in os.listdir(DEFAULT_DATA_DIR) if f.lower().endswith(".pdf")]
+        if pdfs:
+            st.markdown(f'<div class="sidebar-section-title">📑 Indexed Files ({len(pdfs)})</div>', unsafe_allow_html=True)
+            for f in pdfs:
+                col1, col2 = st.columns([0.82, 0.18])
+                with col1:
+                    st.markdown(f"""
+                    <div class="file-card">
+                        <span class="file-card-icon">📄</span>
+                        <span class="file-card-name" title="{f}">{f}</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+                with col2:
+                    if st.button("🗑️", key=f"del_{f}", help=f"Remove {f} from index"):
+                        manager = RAGIndexManager()
+                        manager.remove_document(f)
+                        st.cache_resource.clear()
+                        st.rerun()
+
+    st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
+
+    # Retrieval Pipeline Info
+    st.markdown('<div class="sidebar-section-title">⚙️ Retrieval Pipeline</div>', unsafe_allow_html=True)
+    with st.expander("View details", expanded=False):
+        st.markdown("""
+        <div style="padding:4px 0">
+            <div class="pipeline-chip"><span class="chip-icon">🔀</span> Hybrid Search (BM25 + Vector)</div>
+            <div class="pipeline-chip"><span class="chip-icon">🎯</span> Reciprocal Rank Fusion</div>
+            <div class="pipeline-chip"><span class="chip-icon">🏆</span> Cross-encoder Reranker</div>
+            <div class="pipeline-chip"><span class="chip-icon">💡</span> HyDE Query Transform</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.markdown("""
+    <div style="margin-top:30px;text-align:center;">
+        <p style="color:#1e293b;font-size:0.72rem;margin:0;">Powered by NVIDIA AI · LlamaIndex</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+# ======================================================
+# MAIN CONTENT — Hero Banner
+# ======================================================
+st.markdown("""
+<div class="hero-banner">
+    <div class="hero-badge">🧠 Multi-Document RAG</div>
+    <h1 class="hero-title">Ask Anything Across Your Documents</h1>
+    <p class="hero-subtitle">
+        Upload multiple PDFs and query your entire knowledge base simultaneously.<br>
+        Powered by hybrid search, neural reranking, and NVIDIA AI.
+    </p>
+</div>
+""", unsafe_allow_html=True)
 
 # ======================================================
 # CHAT INTERFACE & SESSION STATE
@@ -241,66 +475,98 @@ with st.sidebar:
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
+# Empty state
+if not st.session_state.messages:
+    if query_engine is None:
+        st.markdown("""
+        <div class="empty-state">
+            <div class="empty-icon">📂</div>
+            <p class="empty-title">No documents indexed yet</p>
+            <p class="empty-sub">Upload one or more PDF files from the sidebar<br>to start chatting with your knowledge base.</p>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        pdf_count = len([f for f in os.listdir(DEFAULT_DATA_DIR) if f.lower().endswith(".pdf")]) if os.path.exists(DEFAULT_DATA_DIR) else 0
+        st.markdown(f"""
+        <div class="empty-state">
+            <div class="empty-icon">💬</div>
+            <p class="empty-title">Ready to answer your questions</p>
+            <p class="empty-sub">{pdf_count} document{"s" if pdf_count != 1 else ""} indexed · Type a question below to get started.</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+# Render existing chat history
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
-        st.write(message["content"])
+        st.markdown(message["content"])
 
-question = st.chat_input("Ask something about your collective knowledge base...")
+# ======================================================
+# CHAT INPUT & QUERY HANDLING
+# ======================================================
+question = st.chat_input("Ask something about your documents…")
 
 if question:
     if query_engine is None:
-        st.warning("Please upload at least one PDF file via the sidebar to initialize search.")
+        st.warning("⚠️ Please upload at least one PDF via the sidebar to initialize the search engine.")
         st.stop()
 
     with st.chat_message("user"):
-        st.write(question)
-
+        st.markdown(question)
     st.session_state.messages.append({"role": "user", "content": question})
 
-    # Query Execution
-    response = query_engine.query(question)
-    for i, node in enumerate(response.source_nodes):
-        print(i, node.score, node.metadata.get('source_file'), node.text[:80])
-    answer = response.response
-
     with st.chat_message("assistant"):
-        st.write(answer)
-        st.write("### 🔍 Citations & Sources")
+        with st.spinner("Searching across documents…"):
+            try:
+                response = query_engine.query(question)
+                answer = response.response
+            except Exception as e:
+                logger.exception(f"Query execution error: {e}")
+                st.error(f"❌ An error occurred during search: {e}")
+                answer = None
 
-        print(f"[DEBUG-FINAL-SOURCE-NODES] {len(response.source_nodes)} nodes reaching the UI:")
-        for i, n in enumerate(response.source_nodes):
-            print(f"  {i}: score={n.score:.4f} | file={n.metadata.get('source_file')} | text={n.text[:100]!r}")
+        if answer is not None:
+            st.markdown(answer)
 
-        bad_keywords = ["rdf:", "pdfSchema", "stream", "endstream", "<?xpacket"]
-        seen_texts = set()
-        source_count = 0
-        dropped_by_dedup = 0
-        dropped_by_bad_keywords = 0
+            # Citations section
+            st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
+            st.markdown("""
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+                <span style="font-size:1rem;">🔍</span>
+                <span style="color:#a5b4fc;font-size:0.85rem;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;">Sources &amp; Citations</span>
+            </div>
+            """, unsafe_allow_html=True)
 
-        for node in response.source_nodes:
-            text = node.text.strip()
-            has_bad_keyword = any(keyword in text for keyword in bad_keywords)
-            is_duplicate = text in seen_texts
-            if has_bad_keyword:
-                dropped_by_bad_keywords += 1
-            if is_duplicate:
-                dropped_by_dedup += 1
-            if has_bad_keyword or is_duplicate:
-                continue
-            
-            seen_texts.add(text)
-            source_count += 1
-            
-            # Extract metadata origin filename if available
-            filename = node.metadata.get('source_file', 'Unknown Document')
+            bad_keywords = ["rdf:", "pdfSchema", "stream", "endstream", "<?xpacket"]
+            seen_texts = set()
+            source_count = 0
 
-            st.write(f"**Source {source_count}** | From: `{filename}`")
-            st.write(text[:400] + "...")
-            st.divider()
+            for node in getattr(response, "source_nodes", []):
+                text = node.text.strip()
+                if any(keyword in text for keyword in bad_keywords) or text in seen_texts:
+                    continue
 
-        print(f"[DEBUG-CITATION-FILTERS] dropped_by_dedup={dropped_by_dedup} | dropped_by_bad_keywords={dropped_by_bad_keywords}")
+                seen_texts.add(text)
+                source_count += 1
+                filename = node.metadata.get('source_file', 'Unknown Document')
+                score = getattr(node, 'score', None)
+                score_str = f"{score:.3f}" if score is not None else "—"
 
-        if source_count == 0:
-            st.write("No clean text citations extracted for this response cycle.")
+                st.markdown(f"""
+                <div class="citation-card">
+                    <div class="citation-header">
+                        <span class="citation-badge">Source {source_count}</span>
+                        <span class="citation-filename">📄 {filename}</span>
+                        <span class="citation-score">score: {score_str}</span>
+                    </div>
+                    <p class="citation-text">{text[:420]}{"…" if len(text) > 420 else ""}</p>
+                </div>
+                """, unsafe_allow_html=True)
 
-    st.session_state.messages.append({"role": "assistant", "content": answer})
+            if source_count == 0:
+                st.markdown("""
+                <div style="color:#475569;font-size:0.83rem;padding:12px 0;text-align:center;">
+                    No verifiable citations found for this response.
+                </div>
+                """, unsafe_allow_html=True)
+
+            st.session_state.messages.append({"role": "assistant", "content": answer})
