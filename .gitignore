@@ -1,7 +1,14 @@
 .env
 __pycache__/
-chroma_db/
+*.pyc
+venv/
+.venv/
 data/
 *.pdf
-.venv/
-*.pyc
+chroma_db/
+chroma_db_backup_*/
+temp_test_chroma/
+*.log
+debug_log.txt
+.pytest_cache/
+evaluation_results/.eval_checkpoint.json
