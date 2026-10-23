@@ -1,128 +1,72 @@
 import os
+import sys
 import asyncio
-import chromadb
+import logging
 from dotenv import load_dotenv
 
-from llama_index.core import VectorStoreIndex, StorageContext, Settings
-from llama_index.vector_stores.chroma import ChromaVectorStore
-from llama_index.llms.openai import OpenAI
-import llama_index.llms.openai.utils as openai_utils
-from llama_index.embeddings.huggingface import HuggingFaceEmbedding
-from llama_index.readers.file import PyMuPDFReader
-from llama_index.retrievers.bm25 import BM25Retriever
-from llama_index.core.retrievers import QueryFusionRetriever
-from llama_index.core.query_engine import RetrieverQueryEngine, TransformQueryEngine
-from llama_index.core.postprocessor import SentenceTransformerRerank
-from llama_index.core.indices.query.query_transform import HyDEQueryTransform
-from llama_index.core import PromptTemplate
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-# Import LlamaIndex Evaluation Modules
+
+from llama_index.core import Settings
 from llama_index.core.evaluation import (
     FaithfulnessEvaluator,
     RelevancyEvaluator,
     BatchEvalRunner
 )
 
+from core_rag import (
+    RAGIndexManager,
+    configure_settings,
+    build_fusion_query_engine,
+    NVIDIA_MODEL,
+    FALLBACK_RESPONSE,
+    APPLICATION_ARCHITECTURE_INFO,
+    is_architecture_or_meta_query
+)
+from eval_utils import (
+    is_fallback_response,
+    evaluate_abstention_structured,
+    evaluate_faithfulness_structured,
+    classify_evaluation_outcome,
+    compute_evaluation_metrics,
+    OutcomeCategory
+)
+import json
+from datetime import datetime
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger("rag_pdf_chatbot_eval")
+
 # 1. Load environment and configurations
 load_dotenv()
 
-# Build NVIDIA API setup
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
-NVIDIA_MODEL = "openai/gpt-oss-20b"
-
 if not NVIDIA_API_KEY:
-    raise ValueError("NVIDIA_API_KEY not found in .env file")
+    raise ValueError("NVIDIA_API_KEY not found in .env file. Please set NVIDIA_API_KEY in your .env.")
 
-# Register the model in LlamaIndex's OpenAI utils so it recognizes the context window
-openai_utils.ALL_AVAILABLE_MODELS[NVIDIA_MODEL] = 128000
-openai_utils.CHAT_MODELS[NVIDIA_MODEL] = 128000
+# Configure LLM and embedding settings matching application parameters
+configure_settings(api_key=NVIDIA_API_KEY)
 
-# Set up the LLM pointing to NVIDIA NIM using the OpenAI interface
-Settings.llm = OpenAI(
-    model=NVIDIA_MODEL,
-    api_key=NVIDIA_API_KEY,
-    api_base="https://integrate.api.nvidia.com/v1",
-    temperature=1.0,
-    max_tokens=4096,
-    additional_kwargs={"top_p": 1}
-)
-Settings.embed_model = HuggingFaceEmbedding(model_name="sentence-transformers/all-MiniLM-L6-v2")
-
-reranker = SentenceTransformerRerank(model="BAAI/bge-reranker-base", top_n=5)
-hyde = HyDEQueryTransform(include_original=True)
-
-qa_prompt = PromptTemplate(
-    """You are an advanced multi-document assistant. You ONLY answer using the exact text provided below.
-Do NOT use any outside knowledge. Do NOT guess or infer beyond what is written.
-
-If the answer is not explicitly stated in the context below, respond with:
-"I could not find that information across the uploaded documents."
-
----------------------
-DOCUMENT CONTEXT:
-{context_str}
----------------------
-
-Question: {query_str}
-
-Answer using ONLY the context above:"""
-)
-
-def build_fusion_query_engine(index):
-    nodes = list(index.docstore.docs.values())
-    print(f"[DEBUG] Nodes found in docstore: {len(nodes)}")
-    vector_retriever = index.as_retriever(similarity_top_k=15)
-    bm25_retriever = BM25Retriever.from_defaults(nodes=nodes, similarity_top_k=15)
-    fusion_retriever = QueryFusionRetriever(
-        retrievers=[vector_retriever, bm25_retriever],
-        similarity_top_k=15,
-        num_queries=1,
-        mode="reciprocal_rerank",
-        use_async=False,
-    )
-    base_query_engine = RetrieverQueryEngine.from_args(
-        fusion_retriever,
-        node_postprocessors=[reranker],
-        text_qa_template=qa_prompt,
-        response_mode="compact",
-    )
-    return TransformQueryEngine(base_query_engine, query_transform=hyde)
 
 async def run_rag_evaluation():
-    print("🔄 Initializing Vector Database Context...")
-    
-    # 2. Connect to your existing persistent ChromaDB
-    db = chromadb.PersistentClient(path="./chroma_db")
-    chroma_collection = db.get_or_create_collection("pdf_collection")
-    vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
-    storage_context = StorageContext.from_defaults(vector_store=vector_store)
-    
-    loader = PyMuPDFReader()
-    documents = []
+    print("🔄 Initializing Vector Database Context from persistent storage...")
 
-    for file in os.listdir("./data"):
-        if file.endswith(".pdf"):
-            docs = loader.load(file_path=os.path.join("./data", file))
-            for doc in docs:
-                doc.metadata["source_file"] = file
-            documents.extend(docs)
+    # Connect to the persistent index manager without duplicating or corrupting data
+    manager = RAGIndexManager()
+    index = manager.sync_index()
 
-    index = VectorStoreIndex.from_documents(
-        documents,
-        storage_context=storage_context,
-        store_nodes_override=True
-    )
-    
+    if index is None or not manager.get_indexed_files():
+        print("❌ No indexed documents found. Please upload at least one PDF via app.py or place a PDF in ./data.")
+        return
+
+    print(f"📑 Indexed documents detected: {manager.get_indexed_files()}")
+    print(f"📊 Total nodes in docstore: {len(index.docstore.docs)}")
+
     # Create the query engine using the same fusion+rerank+HyDE pipeline as app.py
     query_engine = build_fusion_query_engine(index)
-    
-    print(f"[DEBUG] Docstore nodes after load: {len(index.docstore.docs)}")
-    if len(index.docstore.docs) == 0:
-        print("[WARNING] Docstore is empty — BM25Retriever will fail. "
-              "The vector store may need to be rebuilt with store_nodes_override=True "
-              "at index-creation time (in app.py), not just at load time.")
 
-    # 3. Define evaluation questions 
+    # 3. Define evaluation questions (Category A, B, C)
     eval_questions = [
         # Category A - vague/paraphrased
         "How do you make sure retrieval finds the right chunks?",
@@ -138,60 +82,168 @@ async def run_rag_evaluation():
         "What happens if the answer isn't in the documents?",
         "How does this chatbot decide which document to search?",
     ]
-    
+
     # 4. Initialize Evaluators and Runner
     print(f"🧪 Setting up evaluators for {len(eval_questions)} test queries...")
     faithfulness_eval = FaithfulnessEvaluator(llm=Settings.llm)
     relevancy_eval = RelevancyEvaluator(llm=Settings.llm)
-    
+
     runner = BatchEvalRunner(
         evaluators={
             "faithfulness": faithfulness_eval,
             "relevancy": relevancy_eval
         },
-        workers=2 # Parallel execution
+        workers=1  # Sequential execution to prevent request contention and rate limits
     )
 
-    print("🚀 Running batch evaluation pipeline via NVIDIA LLaMA 3 Judge...")
+    print(f"🚀 Running batch evaluation pipeline via NVIDIA LLM ({NVIDIA_MODEL}) Judge...")
     # 5. Execute evaluation
     eval_results = await runner.aevaluate_queries(
         query_engine,
         queries=eval_questions
     )
-    
-    # 6. Parse and display scores
-    print("\n" + "="*50)
-    print("📊 RAG EVALUATION REPORT")
-    print("="*50)
-    
-    faith_scores = [res.score for res in eval_results["faithfulness"]]
-    rel_scores = [res.score for res in eval_results["relevancy"]]
-    
-    avg_faith = sum(faith_scores) / len(faith_scores) if faith_scores else 0
-    avg_rel = sum(rel_scores) / len(rel_scores) if rel_scores else 0
-    
-    print(f"✅ Average Faithfulness Score (No Hallucinations): {avg_faith:.2f} / 1.0")
-    print(f"🎯 Average Relevancy Score (Directly Answers Query): {avg_rel:.2f} / 1.0")
-    print("="*50)
-    
-    # Detail breakdown - now with full response text and feedback
-    responses = eval_results["faithfulness"]  # each result also has .response and .contexts
+
+    records = []
+    responses = eval_results["faithfulness"]
+
+    print("\n🔍 Validating judge responses and executing structured evaluations...")
     for i, q in enumerate(eval_questions):
-        print(f"\n{'='*60}")
-        print(f"[Q{i+1}]: {q}")
-        print(f"{'='*60}")
-        safe_response = responses[i].response.encode('ascii', errors='replace').decode('ascii')
+        print(f"  [{i + 1}/{len(eval_questions)}] Evaluating query: '{q[:50]}...'")
+        resp_obj = responses[i]
+        answer_text = resp_obj.response
+        contexts = resp_obj.contexts or []
+        legacy_faith = eval_results["faithfulness"][i].score
+        rel_score = eval_results["relevancy"][i].score
+        raw_feedback = eval_results["faithfulness"][i].feedback
+
+        fallback = is_fallback_response(answer_text)
+
+        if fallback:
+            is_justified, judge_reason, is_valid = await evaluate_abstention_structured(
+                query=q,
+                contexts=contexts,
+                llm=Settings.llm
+            )
+            structured_faith_score = None
+        else:
+            is_justified = None
+            eval_contexts = contexts
+            if is_architecture_or_meta_query(q):
+                eval_contexts = [APPLICATION_ARCHITECTURE_INFO] + contexts
+
+            structured_faith_score, judge_reason, is_valid = await evaluate_faithfulness_structured(
+                query=q,
+                response=answer_text,
+                contexts=eval_contexts,
+                initial_feedback=raw_feedback if not is_architecture_or_meta_query(q) else None,
+                llm=Settings.llm
+            )
+
+        outcome_cat = classify_evaluation_outcome(
+            is_fallback=fallback,
+            faithfulness_score=structured_faith_score,
+            is_abstention_justified=is_justified,
+            is_evaluation_valid=is_valid
+        )
+
+        records.append({
+            "id": f"Q{i + 1}",
+            "query": q,
+            "answer": answer_text,
+            "is_fallback": fallback,
+            "is_abstention_justified": is_justified,
+            "outcome_category": outcome_cat,
+            "legacy_faithfulness": legacy_faith,
+            "structured_faithfulness": structured_faith_score,
+            "judge_explanation": judge_reason,
+            "is_evaluation_valid": is_valid,
+            "raw_feedback": raw_feedback,
+            "relevancy": rel_score,
+            "relevancy_feedback": eval_results["relevancy"][i].feedback,
+            "contexts": contexts
+        })
+
+        # Save incremental checkpoint
+        try:
+            os.makedirs("evaluation_results", exist_ok=True)
+            checkpoint_path = os.path.join("evaluation_results", ".eval_checkpoint.json")
+            with open(checkpoint_path, "w", encoding="utf-8") as cp_f:
+                json.dump({
+                    "timestamp": datetime.now().isoformat(),
+                    "completed_count": len(records),
+                    "total_count": len(eval_questions),
+                    "records": [
+                        {k: (v.value if hasattr(v, "value") else v) for k, v in rec.items()}
+                        for rec in records
+                    ]
+                }, cp_f, indent=2, default=lambda o: float(o) if hasattr(o, "item") else str(o))
+        except Exception as cp_err:
+            logger.warning(f"Could not save checkpoint: {cp_err}")
+
+    metrics = compute_evaluation_metrics(records)
+
+    # 6. Parse and display scores
+    print("\n" + "=" * 65)
+    print("📊 RAG EVALUATION & GROUNDING REPORT (STRUCTURED JUDGE)")
+    print("=" * 65)
+    print(f"Total Evaluated Queries: {metrics['total_queries']}")
+    print(f"|- Substantive Answers (Valid):  {metrics['total_substantive_answers']}")
+    print(f"|   |- Supported Answers:        {metrics['supported_answers']}")
+    print(f"|   '- Unsupported Answers:      {metrics['unsupported_answers']}")
+    print(f"|- Abstentions (Valid):          {metrics['total_abstentions']}")
+    print(f"|   |- Justified Abstentions:    {metrics['justified_abstentions']}")
+    print(f"|   '- Unjustified Abstentions:  {metrics['unjustified_abstentions']}")
+    print(f"'- Evaluation Errors / Invalid:  {metrics['evaluation_errors']}")
+    print("-" * 65)
+    print("📈 METRICS SUMMARY:")
+    print(f"1. Legacy Faithfulness (Raw historical metric):   {metrics['legacy_faithfulness']:.2f} / 1.0")
+    g_faith = f"{metrics['grounded_answer_faithfulness']:.2f} / 1.0" if metrics['grounded_answer_faithfulness'] is not None else "N/A"
+    print(f"2. Grounded Answer Faithfulness (Non-fallback):   {g_faith}")
+    abs_acc = f"{metrics['abstention_accuracy']:.2f} / 1.0" if metrics['abstention_accuracy'] is not None else "N/A"
+    print(f"3. Abstention Accuracy (Correct Refusals):        {abs_acc}")
+    print(f"4. Overall Grounding Rate (Supported + Justified): {metrics['overall_grounding_rate']:.2f} / 1.0")
+    print(f"5. Average Relevancy:                             {metrics['average_relevancy']:.2f} / 1.0")
+    print("=" * 65)
+
+    # Detail breakdown
+    for r in records:
+        print(f"\n[{r['id']}]: {r['query']}")
+        print(f"Outcome: {r['outcome_category'].value}")
+        safe_response = r['answer'].encode('ascii', errors='replace').decode('ascii')
         print(f"GENERATED ANSWER:\n{safe_response}\n")
-        print(f"|- Faithfulness: {eval_results['faithfulness'][i].score}")
-        print(f"|  Feedback: {eval_results['faithfulness'][i].feedback}")
-        print(f"|- Relevancy:    {eval_results['relevancy'][i].score}")
-        print(f"|  Feedback: {eval_results['relevancy'][i].feedback}")
-        contexts = responses[i].contexts
-        print(f"|- Retrieved context count: {len(contexts) if contexts else 0}")
-        if contexts:
-            for j, ctx in enumerate(contexts[:2]):
-                safe_ctx = ctx[:200].encode('ascii', errors='replace').decode('ascii')
-                print(f"     [{j}] {safe_ctx}...")
+        print(f"|- Structured Verdict / Explanation: {r['judge_explanation']}")
+        print(f"|- Legacy Faithfulness:              {r['legacy_faithfulness']} (Raw: {r['raw_feedback']})")
+        print(f"|- Relevancy:                        {r['relevancy']} (Feedback: {r['relevancy_feedback']})")
+        if r['is_fallback']:
+            just_str = "JUSTIFIED (Context lacked answer)" if r['is_abstention_justified'] else "UNJUSTIFIED (Context had answer)"
+            print(f"|- Abstention Status:                {just_str}")
+        print(f"|- Retrieved Contexts:               {len(r['contexts'])} chunks")
+        if r['contexts']:
+            safe_ctx = r['contexts'][0][:180].encode('ascii', errors='replace').decode('ascii')
+            print(f"     [Top chunk] {safe_ctx}...")
+
+    # Save results to evaluation_results folder
+    os.makedirs("evaluation_results", exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_path = os.path.join("evaluation_results", f"phase3_evaluation_{ts}.json")
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump({
+            "metrics": metrics,
+            "records": [
+                {k: (v.value if hasattr(v, "value") else v) for k, v in rec.items()}
+                for rec in records
+            ]
+        }, f, indent=2, default=lambda o: float(o) if hasattr(o, "item") else str(o))
+    print(f"\n💾 Saved full Phase 3 evaluation trace to: {output_path}")
+
+    # Remove temporary checkpoint on successful completion
+    checkpoint_path = os.path.join("evaluation_results", ".eval_checkpoint.json")
+    if os.path.exists(checkpoint_path):
+        try:
+            os.remove(checkpoint_path)
+        except Exception:
+            pass
+
 
 if __name__ == "__main__":
     asyncio.run(run_rag_evaluation())
