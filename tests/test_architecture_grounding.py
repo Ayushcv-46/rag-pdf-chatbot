@@ -5,7 +5,10 @@ from core_rag import (
     qa_prompt,
     get_runtime_architecture_info,
     is_architecture_or_meta_query,
-    FALLBACK_RESPONSE
+    FALLBACK_RESPONSE,
+    build_contextual_query,
+    sanitize_filename,
+    validate_pdf_bytes,
 )
 
 
@@ -18,7 +21,7 @@ def test_runtime_architecture_facts():
     assert info["has_langgraph"] is False
     assert info["document_routing"] == "simultaneous_unified_collection_search"
     assert info["retrieval"]["reranker"] == "BAAI/bge-reranker-base_top_5"
-    assert info["retrieval"]["query_transform"] == "hyde"
+    assert info["retrieval"]["query_transform"] == "none"
 
 
 def test_architecture_meta_query_detection():
@@ -159,3 +162,21 @@ def test_prompt_prohibits_extrapolation():
     assert "latency estimates" in prompt_lower
     # Must explicitly prohibit extrapolation
     assert "do not extrapolate beyond what the context says" in prompt_lower
+
+
+def test_upload_validation_and_filename_sanitization():
+    assert sanitize_filename("../study notes?.pdf") == "study notes_.pdf"
+    with pytest.raises(ValueError, match="valid PDF"):
+        validate_pdf_bytes(b"not-a-pdf")
+
+
+def test_contextual_query_uses_bounded_history():
+    query = build_contextual_query(
+        "What about the second one?",
+        [
+            {"role": "user", "content": "Explain the first topic."},
+            {"role": "assistant", "content": "The first topic is retrieval."},
+        ],
+    )
+    assert "Explain the first topic." in query
+    assert "What about the second one?" in query

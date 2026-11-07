@@ -19,19 +19,16 @@ from core_rag import (
     RAGIndexManager,
     configure_settings,
     build_fusion_query_engine,
-    NVIDIA_MODEL,
+    GROQ_MODEL,
     qa_prompt
 )
-from llama_index.core.retrievers import QueryFusionRetriever
-from llama_index.retrievers.bm25 import BM25Retriever
 from llama_index.core.postprocessor import SentenceTransformerRerank
-from llama_index.core.indices.query.query_transform import HyDEQueryTransform
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("rag_diagnostic_eval")
 
 load_dotenv()
-NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 EVAL_QUESTIONS = [
     # Category A - vague/paraphrased
@@ -51,11 +48,11 @@ EVAL_QUESTIONS = [
 
 
 async def run_diagnostics():
-    if not NVIDIA_API_KEY:
-        print("ERROR: NVIDIA_API_KEY not configured in .env")
+    if not GROQ_API_KEY:
+        print("ERROR: GROQ_API_KEY not configured in .env")
         return None
 
-    configure_settings(api_key=NVIDIA_API_KEY)
+    configure_settings(api_key=GROQ_API_KEY)
 
     manager = RAGIndexManager()
     index = manager.sync_index()
@@ -68,19 +65,8 @@ async def run_diagnostics():
     print(f"Indexed files: {manager.get_indexed_files()}")
     print(f"Docstore node count: {len(nodes)}")
 
-    # Construct the exact same components for intermediate step inspection
-    vector_retriever = index.as_retriever(similarity_top_k=15)
-    bm25_retriever = BM25Retriever.from_defaults(nodes=nodes, similarity_top_k=15)
-    fusion_retriever = QueryFusionRetriever(
-        retrievers=[vector_retriever, bm25_retriever],
-        similarity_top_k=15,
-        num_queries=1,
-        mode="reciprocal_rerank",
-        use_async=False,
-    )
     reranker = SentenceTransformerRerank(model="BAAI/bge-reranker-base", top_n=5)
-    hyde = HyDEQueryTransform(include_original=True)
-    query_engine = build_fusion_query_engine(index, reranker=reranker, hyde=hyde, qa_template=qa_prompt)
+    query_engine = build_fusion_query_engine(index, reranker=reranker, qa_template=qa_prompt)
 
     faithfulness_eval = FaithfulnessEvaluator(llm=Settings.llm)
     relevancy_eval = RelevancyEvaluator(llm=Settings.llm)
@@ -99,12 +85,8 @@ async def run_diagnostics():
         query_str = item["q"]
         print(f"[{qid}] Processing: '{query_str}'")
 
-        # 1. Capture HyDE query transformation
-        transformed_query = hyde(QueryBundle(query_str))
-        hypothetical_doc = transformed_query.query_str
-
-        # 2. Retrieve raw fused candidates before reranking
-        raw_candidates = fusion_retriever.retrieve(transformed_query)
+        # 1. Retrieve raw fused candidates before reranking
+        raw_candidates = query_engine.retriever.retrieve(query_str)
         raw_nodes_info = [
             {
                 "rank": i + 1,
@@ -115,7 +97,7 @@ async def run_diagnostics():
             for i, n in enumerate(raw_candidates)
         ]
 
-        # 3. Postprocess with reranker
+        # 2. Postprocess with reranker
         reranked_nodes = reranker.postprocess_nodes(raw_candidates, query_bundle=QueryBundle(query_str))
         reranked_nodes_info = [
             {
@@ -127,11 +109,11 @@ async def run_diagnostics():
             for i, n in enumerate(reranked_nodes)
         ]
 
-        # 4. Generate final answer through query engine
+        # 3. Generate final answer through query engine
         response = query_engine.query(query_str)
         answer = response.response
 
-        # 5. Run evaluators
+        # 4. Run evaluators
         faith_eval = await faithfulness_eval.aevaluate(
             query=query_str,
             response=answer,
@@ -144,7 +126,7 @@ async def run_diagnostics():
             contexts=[n.text for n in response.source_nodes]
         )
 
-        # 6. Preliminary Failure Classification
+        # 5. Preliminary Failure Classification
         fallback_phrase = "I could not find that information across the uploaded documents."
         is_fallback = fallback_phrase.lower() in answer.lower()
         faith_score = faith_eval.score
@@ -186,7 +168,6 @@ async def run_diagnostics():
             "id": qid,
             "category": cat,
             "query": query_str,
-            "hypothetical_doc": hypothetical_doc,
             "raw_candidate_count": len(raw_candidates),
             "raw_candidates": raw_nodes_info[:5],  # top 5
             "reranked_count": len(reranked_nodes),

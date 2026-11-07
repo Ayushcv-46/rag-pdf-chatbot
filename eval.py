@@ -19,7 +19,7 @@ from core_rag import (
     RAGIndexManager,
     configure_settings,
     build_fusion_query_engine,
-    NVIDIA_MODEL,
+    GROQ_MODEL,
     FALLBACK_RESPONSE,
     APPLICATION_ARCHITECTURE_INFO,
     is_architecture_or_meta_query
@@ -41,12 +41,12 @@ logger = logging.getLogger("rag_pdf_chatbot_eval")
 # 1. Load environment and configurations
 load_dotenv()
 
-NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
-if not NVIDIA_API_KEY:
-    raise ValueError("NVIDIA_API_KEY not found in .env file. Please set NVIDIA_API_KEY in your .env.")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+if not GROQ_API_KEY:
+    raise ValueError("GROQ_API_KEY not found in .env file. Please set GROQ_API_KEY in your .env.")
 
 # Configure LLM and embedding settings matching application parameters
-configure_settings(api_key=NVIDIA_API_KEY)
+configure_settings(api_key=GROQ_API_KEY)
 
 
 async def run_rag_evaluation():
@@ -63,7 +63,7 @@ async def run_rag_evaluation():
     print(f"📑 Indexed documents detected: {manager.get_indexed_files()}")
     print(f"📊 Total nodes in docstore: {len(index.docstore.docs)}")
 
-    # Create the query engine using the same fusion+rerank+HyDE pipeline as app.py
+    # Create the query engine using the same fusion and reranking pipeline as app.py
     query_engine = build_fusion_query_engine(index)
 
     # 3. Define evaluation questions (Category A, B, C)
@@ -96,7 +96,7 @@ async def run_rag_evaluation():
         workers=1  # Sequential execution to prevent request contention and rate limits
     )
 
-    print(f"🚀 Running batch evaluation pipeline via NVIDIA LLM ({NVIDIA_MODEL}) Judge...")
+    print(f"🚀 Running batch evaluation pipeline via Groq LLM ({GROQ_MODEL}) Judge...")
     # 5. Execute evaluation
     eval_results = await runner.aevaluate_queries(
         query_engine,
