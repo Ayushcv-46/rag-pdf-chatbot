@@ -1,5 +1,8 @@
 import os
 import logging
+import html
+import time
+import hashlib
 import streamlit as st
 from dotenv import load_dotenv
 
@@ -8,7 +11,13 @@ from core_rag import (
     configure_settings,
     build_fusion_query_engine,
     compute_bytes_hash,
-    DEFAULT_DATA_DIR
+    DEFAULT_DATA_DIR,
+    DEFAULT_CHROMA_DIR,
+    GROQ_MODEL,
+    GROQ_FALLBACK_MODEL,
+    build_contextual_query,
+    sanitize_filename,
+    validate_pdf_bytes,
 )
 
 # ======================================================
@@ -21,14 +30,13 @@ logger = logging.getLogger("rag_pdf_chatbot")
 # LOAD ENV VARIABLES & EARLY KEY CHECK
 # ======================================================
 load_dotenv()
-NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # ======================================================
 # STREAMLIT PAGE CONFIG
 # ======================================================
 st.set_page_config(
     page_title="DocuMind — RAG PDF Chatbot",
-    page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -314,29 +322,239 @@ html, body, [data-testid="stAppViewContainer"] {
 </style>
 """, unsafe_allow_html=True)
 
+# Professional visual overrides
+st.markdown("""
+<style>
+:root {
+    --ink: #172033;
+    --muted: #64748b;
+    --line: #e2e8f0;
+    --surface: #ffffff;
+    --surface-soft: #f8fafc;
+    --accent: #2563eb;
+}
+html, body, [data-testid="stAppViewContainer"] {
+    background: #f5f7fb !important;
+    color: var(--ink) !important;
+    font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif !important;
+}
+[data-testid="stAppViewContainer"] > .main {
+    background: #f5f7fb !important;
+}
+[data-testid="stSidebar"] {
+    background: var(--surface) !important;
+    border-right: 1px solid var(--line) !important;
+    min-width: 290px !important;
+    max-width: 290px !important;
+}
+[data-testid="stSidebar"] * { color: var(--ink); }
+#MainMenu, footer, header { visibility: hidden !important; }
+.hero-banner {
+    background: var(--surface) !important;
+    border: 1px solid var(--line) !important;
+    border-radius: 12px !important;
+    box-shadow: 0 8px 24px rgba(15, 23, 42, .05) !important;
+    padding: 28px 32px !important;
+    margin-bottom: 24px !important;
+}
+.hero-banner::before, .hero-banner::after { display: none !important; }
+.hero-title {
+    color: var(--ink) !important;
+    background: none !important;
+    -webkit-text-fill-color: initial !important;
+    font-size: 1.8rem !important;
+    letter-spacing: -.02em !important;
+}
+.hero-subtitle { color: var(--muted) !important; }
+.hero-badge {
+    color: var(--accent) !important;
+    background: #eff6ff !important;
+    border: 1px solid #bfdbfe !important;
+    border-radius: 6px !important;
+}
+.sidebar-logo {
+    border-bottom: 1px solid var(--line) !important;
+    padding-bottom: 16px !important;
+}
+.sidebar-logo-text {
+    color: var(--ink) !important;
+    background: none !important;
+    -webkit-text-fill-color: initial !important;
+}
+.sidebar-section-title {
+    color: #475569 !important;
+    letter-spacing: .06em !important;
+    font-size: .68rem !important;
+    font-weight: 700 !important;
+    margin: 22px 0 9px !important;
+}
+.pipeline-chip, .file-card {
+    background: var(--surface-soft) !important;
+    border: 1px solid var(--line) !important;
+    border-radius: 7px !important;
+    color: #334155 !important;
+}
+.file-card {
+    min-height: 38px !important;
+    padding: 8px 10px !important;
+}
+.file-card-name {
+    color: #334155 !important;
+    display: block !important;
+    min-width: 0 !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    white-space: nowrap !important;
+}
+[data-testid="stSidebar"] [data-testid="column"]:last-child button {
+    width: 100% !important;
+    min-height: 38px !important;
+    padding: 0 6px !important;
+    white-space: nowrap !important;
+    font-size: .68rem !important;
+    letter-spacing: -.02em !important;
+}
+[data-testid="stFileUploader"] {
+    background: var(--surface-soft) !important;
+    border: 1px dashed #cbd5e1 !important;
+    border-radius: 8px !important;
+}
+[data-testid="stFileUploader"] [data-testid="stIconMaterial"] {
+    display: none !important;
+}
+[data-testid="stFileUploader"] button p,
+[data-testid="stSidebar"] [data-testid="stBaseButton-secondary"] p {
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+}
+[data-testid="stChatInput"] {
+    background: var(--surface) !important;
+    border: 1px solid #cbd5e1 !important;
+    border-radius: 10px !important;
+    box-shadow: 0 4px 14px rgba(15, 23, 42, .06) !important;
+    min-height: 52px !important;
+}
+[data-testid="stChatInput"] textarea,
+[data-testid="stChatInput"] textarea:focus {
+    color: #0f172a !important;
+    -webkit-text-fill-color: #0f172a !important;
+    caret-color: #2563eb !important;
+    background: #ffffff !important;
+    font-size: .95rem !important;
+    line-height: 1.45 !important;
+}
+[data-testid="stChatInput"] textarea::placeholder {
+    color: #94a3b8 !important;
+    opacity: 1 !important;
+}
+[data-testid="stChatMessage"] {
+    background: transparent !important;
+}
+[data-testid="stChatMessageAvatar"] {
+    width: 2rem !important;
+    min-width: 2rem !important;
+    height: 2rem !important;
+}
+.citation-card {
+    background: var(--surface) !important;
+    border: 1px solid var(--line) !important;
+    border-left: 3px solid var(--accent) !important;
+    border-radius: 8px !important;
+    box-shadow: none !important;
+}
+.citation-filename, .citation-badge { color: #1d4ed8 !important; }
+.citation-text { color: #475569 !important; }
+.empty-state { padding: 48px 40px !important; }
+.empty-icon { display: none !important; }
+.empty-title { color: var(--ink) !important; font-size: 1.05rem !important; }
+.empty-sub { color: var(--muted) !important; }
+.workspace-meta {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    color: #64748b;
+    font-size: .78rem;
+    margin: 8px 0 0;
+}
+.status-dot {
+    width: 7px !important;
+    height: 7px !important;
+    box-shadow: none !important;
+    animation: none !important;
+}
+.status-offline { background: #94a3b8 !important; }
+.main .block-container {
+    max-width: 1180px !important;
+    padding-top: 2rem !important;
+    padding-bottom: 10rem !important;
+}
+[data-testid="stChatMessage"] {
+    padding-top: .75rem !important;
+    padding-bottom: .75rem !important;
+}
+[data-testid="stChatMessageContent"] {
+    color: #0f172a !important;
+    line-height: 1.7 !important;
+    max-width: 820px !important;
+}
+[data-testid="stChatMessageContent"] p {
+    margin-bottom: .65rem !important;
+}
+html body .stApp [data-testid="stChatInput"],
+html body .stApp [data-testid="stChatInput"]:focus-within {
+    border: 1px solid #cbd5e1 !important;
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, .10) !important;
+}
+html body .stApp [data-testid="stChatInput"] textarea,
+html body .stApp [data-testid="stChatInput"] textarea:focus {
+    outline: none !important;
+    border: 0 !important;
+}
+html body .stApp [data-testid="stBottom"] {
+    background: rgba(248, 250, 252, .96) !important;
+    padding: 10px 0 14px !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
 # ======================================================
 # API KEY VALIDATION
 # ======================================================
-if not NVIDIA_API_KEY:
-    st.error("⚠️ `NVIDIA_API_KEY` not found in environment or `.env` file! Please configure `NVIDIA_API_KEY=your_key_here` to use the chatbot.")
+if not GROQ_API_KEY:
+    st.error("GROQ_API_KEY was not found in the environment or .env file. Configure it before starting the chatbot.")
     st.stop()
 
+APP_PASSWORD = os.getenv("APP_PASSWORD")
+APP_USERNAME = "default"
+if APP_PASSWORD:
+    APP_USERNAME = st.sidebar.text_input("Workspace name", key="workspace_name").strip()
+    entered_password = st.sidebar.text_input("Workspace password", type="password", key="workspace_password")
+    if not APP_USERNAME or entered_password != APP_PASSWORD:
+        st.sidebar.info("Enter your workspace credentials to continue.")
+        st.stop()
+
+workspace_id = hashlib.sha256(APP_USERNAME.encode("utf-8")).hexdigest()[:16]
+APP_DATA_DIR = os.path.join("data", "users", workspace_id) if APP_PASSWORD else DEFAULT_DATA_DIR
+APP_CHROMA_DIR = os.path.join("chroma_db", "users", workspace_id) if APP_PASSWORD else DEFAULT_CHROMA_DIR
+
 # Configure LLM & embedding settings with verified key
-configure_settings(api_key=NVIDIA_API_KEY)
+configure_settings(api_key=GROQ_API_KEY)
 
 
 # ======================================================
 # CACHED ENGINE LOADER
 # ======================================================
 @st.cache_resource
-def get_cached_query_engine():
-    """Load or restore the persistent index and return the fusion query engine."""
-    manager = RAGIndexManager()
+def get_cached_query_engine(model: str = GROQ_MODEL):
+    """Load the persistent index and bind it to the requested provider model."""
+    configure_settings(api_key=GROQ_API_KEY, model=model)
+    manager = RAGIndexManager(data_dir=APP_DATA_DIR, chroma_dir=APP_CHROMA_DIR)
     index = manager.sync_index()
     if index is None:
         return None
     try:
-        return build_fusion_query_engine(index)
+        return build_fusion_query_engine(index, streaming=True)
     except Exception as e:
         logger.error(f"Error building query engine: {e}")
         return None
@@ -350,7 +568,6 @@ query_engine = get_cached_query_engine()
 with st.sidebar:
     st.markdown("""
     <div class="sidebar-logo">
-        <span style="font-size:1.6rem;">🧠</span>
         <span class="sidebar-logo-text">DocuMind</span>
     </div>
     """, unsafe_allow_html=True)
@@ -364,23 +581,34 @@ with st.sidebar:
         <span style="color:#64748b;font-size:0.8rem;font-weight:500;">{status_label}</span>
     </div>
     """, unsafe_allow_html=True)
+    if APP_PASSWORD:
+        st.markdown(
+            f'<div class="workspace-meta">Workspace <strong>{html.escape(APP_USERNAME)}</strong></div>',
+            unsafe_allow_html=True,
+        )
 
     # Upload zone
-    st.markdown('<div class="sidebar-section-title">📂 Upload Documents</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sidebar-section-title">Upload documents</div>', unsafe_allow_html=True)
     uploaded_files = st.file_uploader(
-        "Drop PDFs here",
+        "Drop PDF files here",
         type=["pdf"],
         accept_multiple_files=True,
         label_visibility="collapsed"
     )
 
     if uploaded_files:
-        os.makedirs(DEFAULT_DATA_DIR, exist_ok=True)
+        os.makedirs(APP_DATA_DIR, exist_ok=True)
         files_updated = False
 
         for uploaded_file in uploaded_files:
-            file_path = os.path.join(DEFAULT_DATA_DIR, uploaded_file.name)
-            uploaded_bytes = uploaded_file.getbuffer().tobytes()
+            try:
+                safe_name = sanitize_filename(uploaded_file.name)
+                uploaded_bytes = uploaded_file.getbuffer().tobytes()
+                validate_pdf_bytes(uploaded_bytes)
+            except ValueError as exc:
+                st.error(f"Cannot upload {html.escape(uploaded_file.name)}: {exc}")
+                continue
+            file_path = os.path.join(APP_DATA_DIR, safe_name)
 
             # Detect new or modified content
             should_write = False
@@ -401,36 +629,37 @@ with st.sidebar:
                         f.write(uploaded_bytes)
                     files_updated = True
                 except Exception as e:
-                    st.error(f"Failed to save {uploaded_file.name}: {e}")
+                    logger.exception("Failed to save uploaded PDF")
+                    st.error(f"Failed to save {html.escape(safe_name)}. Check the application logs.")
 
         if files_updated:
             with st.spinner("Indexing documents…"):
                 try:
-                    manager = RAGIndexManager()
+                    manager = RAGIndexManager(data_dir=APP_DATA_DIR, chroma_dir=APP_CHROMA_DIR)
                     manager.sync_index()
                     st.cache_resource.clear()
-                    st.success("✅ Documents indexed successfully!")
+                    st.success("Documents indexed successfully.")
                     st.rerun()
                 except Exception as e:
-                    st.error(f"❌ Indexing failed: {e}")
+                    logger.exception("Document indexing failed")
+                    st.error("Indexing failed. Check the application logs for details.")
 
     # Indexed Files List with Removal
-    if os.path.exists(DEFAULT_DATA_DIR):
-        pdfs = [f for f in os.listdir(DEFAULT_DATA_DIR) if f.lower().endswith(".pdf")]
+    if os.path.exists(APP_DATA_DIR):
+        pdfs = [f for f in os.listdir(APP_DATA_DIR) if f.lower().endswith(".pdf")]
         if pdfs:
-            st.markdown(f'<div class="sidebar-section-title">📑 Indexed Files ({len(pdfs)})</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="sidebar-section-title">Indexed files ({len(pdfs)})</div>', unsafe_allow_html=True)
             for f in pdfs:
-                col1, col2 = st.columns([0.82, 0.18])
+                col1, col2 = st.columns([0.62, 0.38], gap="small")
                 with col1:
                     st.markdown(f"""
                     <div class="file-card">
-                        <span class="file-card-icon">📄</span>
-                        <span class="file-card-name" title="{f}">{f}</span>
+                        <span class="file-card-name" title="{html.escape(f)}">{html.escape(f)}</span>
                     </div>
                     """, unsafe_allow_html=True)
                 with col2:
-                    if st.button("🗑️", key=f"del_{f}", help=f"Remove {f} from index"):
-                        manager = RAGIndexManager()
+                    if st.button("×", key=f"del_{f}", help=f"Remove {f} from index"):
+                        manager = RAGIndexManager(data_dir=APP_DATA_DIR, chroma_dir=APP_CHROMA_DIR)
                         manager.remove_document(f)
                         st.cache_resource.clear()
                         st.rerun()
@@ -438,20 +667,20 @@ with st.sidebar:
     st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
 
     # Retrieval Pipeline Info
-    st.markdown('<div class="sidebar-section-title">⚙️ Retrieval Pipeline</div>', unsafe_allow_html=True)
-    with st.expander("View details", expanded=False):
+    st.markdown('<div class="sidebar-section-title">Retrieval pipeline</div>', unsafe_allow_html=True)
+    with st.container(border=True):
+        st.caption("Active configuration")
         st.markdown("""
-        <div style="padding:4px 0">
-            <div class="pipeline-chip"><span class="chip-icon">🔀</span> Hybrid Search (BM25 + Vector)</div>
-            <div class="pipeline-chip"><span class="chip-icon">🎯</span> Reciprocal Rank Fusion</div>
-            <div class="pipeline-chip"><span class="chip-icon">🏆</span> Cross-encoder Reranker</div>
-            <div class="pipeline-chip"><span class="chip-icon">💡</span> HyDE Query Transform</div>
+        <div style="padding:2px 0">
+            <div class="pipeline-chip">Hybrid search: BM25 + vector</div>
+            <div class="pipeline-chip">Reciprocal rank fusion</div>
+            <div class="pipeline-chip">Cross-encoder reranking</div>
         </div>
         """, unsafe_allow_html=True)
 
     st.markdown("""
     <div style="margin-top:30px;text-align:center;">
-        <p style="color:#1e293b;font-size:0.72rem;margin:0;">Powered by NVIDIA AI · LlamaIndex</p>
+        <p style="color:#1e293b;font-size:0.72rem;margin:0;">Powered by Groq · LlamaIndex</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -460,11 +689,11 @@ with st.sidebar:
 # ======================================================
 st.markdown("""
 <div class="hero-banner">
-    <div class="hero-badge">🧠 Multi-Document RAG</div>
+<div class="hero-badge">Multi-document knowledge base</div>
     <h1 class="hero-title">Ask Anything Across Your Documents</h1>
     <p class="hero-subtitle">
         Upload multiple PDFs and query your entire knowledge base simultaneously.<br>
-        Powered by hybrid search, neural reranking, and NVIDIA AI.
+        Powered by hybrid search, neural reranking, and Groq.
     </p>
 </div>
 """, unsafe_allow_html=True)
@@ -480,18 +709,16 @@ if not st.session_state.messages:
     if query_engine is None:
         st.markdown("""
         <div class="empty-state">
-            <div class="empty-icon">📂</div>
             <p class="empty-title">No documents indexed yet</p>
             <p class="empty-sub">Upload one or more PDF files from the sidebar<br>to start chatting with your knowledge base.</p>
         </div>
         """, unsafe_allow_html=True)
     else:
-        pdf_count = len([f for f in os.listdir(DEFAULT_DATA_DIR) if f.lower().endswith(".pdf")]) if os.path.exists(DEFAULT_DATA_DIR) else 0
+        pdf_count = len([f for f in os.listdir(APP_DATA_DIR) if f.lower().endswith(".pdf")]) if os.path.exists(APP_DATA_DIR) else 0
         st.markdown(f"""
         <div class="empty-state">
-            <div class="empty-icon">💬</div>
             <p class="empty-title">Ready to answer your questions</p>
-            <p class="empty-sub">{pdf_count} document{"s" if pdf_count != 1 else ""} indexed · Type a question below to get started.</p>
+            <p class="empty-sub">{pdf_count} document{"s" if pdf_count != 1 else ""} indexed. Type a question below to get started.</p>
         </div>
         """, unsafe_allow_html=True)
 
@@ -507,7 +734,7 @@ question = st.chat_input("Ask something about your documents…")
 
 if question:
     if query_engine is None:
-        st.warning("⚠️ Please upload at least one PDF via the sidebar to initialize the search engine.")
+        st.warning("Please upload at least one PDF via the sidebar to initialize the search engine.")
         st.stop()
 
     with st.chat_message("user"):
@@ -516,22 +743,45 @@ if question:
 
     with st.chat_message("assistant"):
         with st.spinner("Searching across documents…"):
+            answer_was_streamed = False
             try:
-                response = query_engine.query(question)
-                answer = response.response
+                contextual_query = build_contextual_query(question, st.session_state.messages[:-1])
+                started_at = time.perf_counter()
+                response = query_engine.query(contextual_query)
+                if hasattr(response, "response_gen"):
+                    answer = st.write_stream(response.response_gen)
+                    answer_was_streamed = True
+                else:
+                    answer = response.response
+                elapsed_ms = (time.perf_counter() - started_at) * 1000
+                logger.info("query_completed latency_ms=%.0f source_count=%d", elapsed_ms, len(response.source_nodes))
             except Exception as e:
                 logger.exception(f"Query execution error: {e}")
-                st.error(f"❌ An error occurred during search: {e}")
-                answer = None
+                try:
+                    fallback_engine = get_cached_query_engine(GROQ_FALLBACK_MODEL)
+                    response = fallback_engine.query(contextual_query)
+                    if hasattr(response, "response_gen"):
+                        answer = st.write_stream(response.response_gen)
+                        answer_was_streamed = True
+                    else:
+                        answer = response.response
+                    st.info("The primary model was unavailable; the fallback model answered this request.")
+                except Exception:
+                    logger.exception("Fallback model query failed")
+                    st.error("The language-model provider could not complete this request.")
+                    st.caption(
+                        "Verify GROQ_API_KEY and GROQ_MODEL in .env, then restart the app. "
+                        "Check the terminal log for the exact provider status."
+                    )
+                    answer = None
 
         if answer is not None:
-            st.markdown(answer)
-
+            if not answer_was_streamed:
+                st.markdown(answer)
             # Citations section
             st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
             st.markdown("""
             <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
-                <span style="font-size:1rem;">🔍</span>
                 <span style="color:#a5b4fc;font-size:0.85rem;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;">Sources &amp; Citations</span>
             </div>
             """, unsafe_allow_html=True)
@@ -547,7 +797,9 @@ if question:
 
                 seen_texts.add(text)
                 source_count += 1
-                filename = node.metadata.get('source_file', 'Unknown Document')
+                filename = html.escape(str(node.metadata.get('source_file', 'Unknown Document')))
+                page_number = node.metadata.get("page_number")
+                page_label = f" · page {page_number}" if page_number else ""
                 score = getattr(node, 'score', None)
                 score_str = f"{score:.3f}" if score is not None else "—"
 
@@ -555,10 +807,10 @@ if question:
                 <div class="citation-card">
                     <div class="citation-header">
                         <span class="citation-badge">Source {source_count}</span>
-                        <span class="citation-filename">📄 {filename}</span>
+                        <span class="citation-filename">{filename}{page_label}</span>
                         <span class="citation-score">score: {score_str}</span>
                     </div>
-                    <p class="citation-text">{text[:420]}{"…" if len(text) > 420 else ""}</p>
+                    <p class="citation-text">{html.escape(text[:420])}{"…" if len(text) > 420 else ""}</p>
                 </div>
                 """, unsafe_allow_html=True)
 

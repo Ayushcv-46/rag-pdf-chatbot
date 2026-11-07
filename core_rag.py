@@ -2,6 +2,8 @@ import os
 import json
 import hashlib
 import logging
+import re
+import time
 from typing import List, Optional, Tuple, Dict, Any
 
 import chromadb
@@ -22,28 +24,31 @@ import llama_index.llms.openai.utils as openai_utils
 from llama_index.readers.file import PyMuPDFReader
 from llama_index.retrievers.bm25 import BM25Retriever
 from llama_index.core.retrievers import QueryFusionRetriever
-from llama_index.core.query_engine import RetrieverQueryEngine, TransformQueryEngine
+from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.postprocessor import SentenceTransformerRerank
-from llama_index.core.indices.query.query_transform import HyDEQueryTransform
 
 logger = logging.getLogger("rag_pdf_chatbot")
 
 # ======================================================
 # CONSTANTS & CONFIGURATION
 # ======================================================
-NVIDIA_MODEL = "openai/gpt-oss-20b"
-NVIDIA_API_BASE = "https://integrate.api.nvidia.com/v1"
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+GROQ_FALLBACK_MODEL = os.getenv("GROQ_FALLBACK_MODEL", "openai/gpt-oss-20b")
+GROQ_API_BASE = "https://api.groq.com/openai/v1"
 COLLECTION_NAME = "pdf_collection"
 DEFAULT_DATA_DIR = "./data"
 DEFAULT_CHROMA_DIR = "./chroma_db"
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
+MAX_PDF_PAGES = int(os.getenv("MAX_PDF_PAGES", "250"))
+MAX_CONTEXT_MESSAGES = int(os.getenv("MAX_CONTEXT_MESSAGES", "6"))
 
 FALLBACK_RESPONSE = "I could not find that information across the uploaded documents."
 
 APPLICATION_ARCHITECTURE_INFO = (
     "ACTUAL APPLICATION RUNTIME ARCHITECTURE FACTS:\n"
-    "- Architecture: Deterministic Multi-Document RAG Pipeline (Streamlit frontend + LlamaIndex engine + ChromaDB storage + NVIDIA NIM).\n"
-    "- Retrieval Flow: User Query -> HyDE Query Transformation -> Parallel Hybrid Search (ChromaDB vector similarity top-15 + BM25 keyword top-15) "
-    "-> Reciprocal Rank Fusion (RRF top-15) -> Cross-Encoder Reranker (BAAI/bge-reranker-base top-5) -> LLM Synthesis (openai/gpt-oss-20b).\n"
+    "- Architecture: Deterministic Multi-Document RAG Pipeline (Streamlit frontend + LlamaIndex engine + ChromaDB storage + Groq).\n"
+    "- Retrieval Flow: User Query -> Parallel Hybrid Search (ChromaDB vector similarity top-15 + BM25 keyword top-15) "
+    "-> Reciprocal Rank Fusion (RRF top-15) -> Cross-Encoder Reranker (BAAI/bge-reranker-base top-5) -> LLM Synthesis (openai/gpt-oss-120b).\n"
     "- Multi-Document Search Mechanism: All uploaded documents are indexed into a single shared ChromaDB collection and BM25 store. "
     "The application does NOT decide, route, or select which document to search; it searches across ALL uploaded documents simultaneously, "
     "retrieving and reranking the most relevant chunks globally based on similarity to the query.\n"
@@ -101,10 +106,10 @@ def get_runtime_architecture_info() -> Dict[str, Any]:
             "keyword": "bm25_top_15",
             "fusion": "reciprocal_rank_fusion",
             "reranker": "BAAI/bge-reranker-base_top_5",
-            "query_transform": "hyde"
+            "query_transform": "none"
         },
         "models": {
-            "llm": NVIDIA_MODEL,
+            "llm": GROQ_MODEL,
             "embed_model": "sentence-transformers/all-MiniLM-L6-v2"
         }
     }
@@ -135,17 +140,60 @@ def compute_bytes_hash(file_bytes: bytes) -> str:
     return hashlib.sha256(file_bytes).hexdigest()
 
 
-def configure_settings(api_key: Optional[str] = None):
+def sanitize_filename(filename: str) -> str:
+    """Return a safe, flat PDF filename suitable for storage under the data directory."""
+    basename = os.path.basename(filename).strip()
+    safe_name = re.sub(r"[^A-Za-z0-9._ -]", "_", basename)
+    safe_name = re.sub(r"\s+", " ", safe_name).strip(" .")
+    if not safe_name or not safe_name.lower().endswith(".pdf"):
+        raise ValueError("Only files with a .pdf extension are accepted.")
+    return safe_name[:180]
+
+
+def validate_pdf_bytes(file_bytes: bytes) -> None:
+    """Validate upload size, PDF signature, and page count before writing to disk."""
+    if not file_bytes:
+        raise ValueError("The uploaded file is empty.")
+    if len(file_bytes) > MAX_UPLOAD_BYTES:
+        raise ValueError(f"PDF exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)} MB upload limit.")
+    if not file_bytes.startswith(b"%PDF-"):
+        raise ValueError("The uploaded file is not a valid PDF.")
+
+    import fitz
+    try:
+        with fitz.open(stream=file_bytes, filetype="pdf") as document:
+            if document.page_count > MAX_PDF_PAGES:
+                raise ValueError(f"PDF exceeds the {MAX_PDF_PAGES}-page limit.")
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError(f"Could not validate PDF: {exc}") from exc
+
+
+def build_contextual_query(question: str, messages: Optional[List[Dict[str, str]]] = None) -> str:
+    """Add a bounded conversation window so follow-up questions resolve correctly."""
+    if not messages:
+        return question.strip()
+    recent = messages[-MAX_CONTEXT_MESSAGES:]
+    history = "\n".join(
+        f"{message.get('role', 'user')}: {message.get('content', '')[:1000]}"
+        for message in recent
+        if message.get("content")
+    )
+    return f"Conversation context:\n{history}\n\nCurrent question: {question.strip()}"
+
+
+def configure_settings(api_key: Optional[str] = None, model: str = GROQ_MODEL):
     """Configure LLM and embedding settings matching existing parameters."""
-    openai_utils.ALL_AVAILABLE_MODELS[NVIDIA_MODEL] = 128000
-    openai_utils.CHAT_MODELS[NVIDIA_MODEL] = 128000
+    openai_utils.ALL_AVAILABLE_MODELS[model] = 131072
+    openai_utils.CHAT_MODELS[model] = 131072
 
     if api_key:
         Settings.llm = OpenAI(
-            model=NVIDIA_MODEL,
+            model=model,
             api_key=api_key,
-            api_base=NVIDIA_API_BASE,
-            temperature=1.0,
+            api_base=GROQ_API_BASE,
+            temperature=0.2,
             max_tokens=4096,
             timeout=30.0,
             max_retries=2,
@@ -167,6 +215,8 @@ def load_pdf_file(file_path: str) -> List[Document]:
 
     file_name = os.path.basename(file_path)
     file_size = os.path.getsize(file_path)
+    if file_size > MAX_UPLOAD_BYTES:
+        raise ValueError(f"PDF exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)} MB upload limit.")
     if file_size == 0:
         logger.warning(f"File {file_name} is empty (0 bytes). Skipping.")
         return []
@@ -178,8 +228,11 @@ def load_pdf_file(file_path: str) -> List[Document]:
         logger.error(f"Failed to parse PDF {file_name}: {e}")
         raise ValueError(f"Could not read PDF '{file_name}': {e}") from e
 
-    for doc in docs:
+    if len(docs) > MAX_PDF_PAGES:
+        raise ValueError(f"PDF exceeds the {MAX_PDF_PAGES}-page limit.")
+    for page_number, doc in enumerate(docs, start=1):
         doc.metadata["source_file"] = file_name
+        doc.metadata["page_number"] = page_number
 
     return docs
 
@@ -383,10 +436,15 @@ class RAGIndexManager:
         return index
 
 
-def build_fusion_query_engine(index: VectorStoreIndex, reranker=None, hyde=None, qa_template=None) -> TransformQueryEngine:
+def build_fusion_query_engine(
+    index: VectorStoreIndex,
+    reranker=None,
+    qa_template=None,
+    streaming: bool = False,
+) -> RetrieverQueryEngine:
     """
     Combines vector search + BM25 keyword search using reciprocal rank fusion,
-    followed by cross-encoder reranking and HyDE query transformation.
+    followed by cross-encoder reranking.
     Preserves exact retrieval hyperparameters.
     """
     nodes = list(index.docstore.docs.values())
@@ -412,9 +470,6 @@ def build_fusion_query_engine(index: VectorStoreIndex, reranker=None, hyde=None,
             top_n=5,
         )
 
-    if hyde is None:
-        hyde = HyDEQueryTransform(include_original=True)
-
     if qa_template is None:
         qa_template = qa_prompt
 
@@ -423,6 +478,7 @@ def build_fusion_query_engine(index: VectorStoreIndex, reranker=None, hyde=None,
         node_postprocessors=[reranker],
         text_qa_template=qa_template,
         response_mode="compact",
+        streaming=streaming,
     )
 
-    return TransformQueryEngine(base_query_engine, query_transform=hyde)
+    return base_query_engine
