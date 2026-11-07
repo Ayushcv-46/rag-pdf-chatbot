@@ -2,11 +2,11 @@
 
 [![Streamlit](https://img.shields.io/badge/Streamlit-FF4B4B?style=for-the-badge&logo=streamlit&logoColor=white)](https://streamlit.io/)
 [![LlamaIndex](https://img.shields.io/badge/LlamaIndex-000000?style=for-the-badge&logo=llama&logoColor=white)](https://www.llamaindex.ai/)
-[![NVIDIA NIM](https://img.shields.io/badge/NVIDIA_NIM-76B900?style=for-the-badge&logo=nvidia&logoColor=white)](https://build.nvidia.com/)
+[![Groq](https://img.shields.io/badge/Groq-F55036?style=for-the-badge)](https://console.groq.com/)
 [![ChromaDB](https://img.shields.io/badge/ChromaDB-FF6F00?style=for-the-badge)](https://www.trychroma.com/)
 [![Tests](https://img.shields.io/badge/Tests-28%20Passed-brightgreen?style=for-the-badge&logo=pytest)](file:///tests)
 
-A production-grade Retrieval-Augmented Generation (RAG) web application built with **Streamlit**, **LlamaIndex**, and **NVIDIA NIM** (`openai/gpt-oss-20b`) for grounded, multi-document question answering across PDF documents.
+A hardened Retrieval-Augmented Generation (RAG) web application built with **Streamlit**, **LlamaIndex**, and **Groq** (`openai/gpt-oss-120b`) for grounded, multi-document question answering across PDF documents.
 
 **[Live Application Demo](https://rag-pdf-chatbot-yh267qtmr7iibpctharmyb.streamlit.app)** 
 
@@ -16,15 +16,21 @@ A production-grade Retrieval-Augmented Generation (RAG) web application built wi
 
 - **Multi-Document Knowledge Base:** Upload and query across multiple PDF documents simultaneously in a unified vector collection.
 - **Incremental Document Synchronization:** Hash-based change detection automatically synchronizes uploads, replaces modified documents, and removes deleted files without full re-indexing.
-- **Advanced 5-Stage Retrieval Pipeline:**
-  1. **HyDE (Hypothetical Document Embeddings):** Generates hypothetical answer passages to bridge phrasing gaps between queries and document text.
-  2. **Hybrid Search:** Combines dense semantic vector search (`sentence-transformers/all-MiniLM-L6-v2`) and sparse keyword search (BM25).
-  3. **Reciprocal Rank Fusion (RRF):** Merges and normalizes candidate chunks across dense and sparse retrievers.
-  4. **Cross-Encoder Joint Reranking:** Re-scores query-chunk pairs jointly with `BAAI/bge-reranker-base` down to the top-5 most relevant chunks.
-  5. **Strict Grounding & Fallback:** System prompt enforces factual synthesis exclusively from retrieved context, returning standard fallback (`"I could not find that information across the uploaded documents."`) when context is insufficient.
+- **Advanced 4-Stage Retrieval Pipeline:**
+  1. **Hybrid Search:** Combines dense semantic vector search (`sentence-transformers/all-MiniLM-L6-v2`) and sparse keyword search (BM25).
+  2. **Reciprocal Rank Fusion (RRF):** Merges and normalizes candidate chunks across dense and sparse retrievers.
+  3. **Cross-Encoder Joint Reranking:** Re-scores query-chunk pairs jointly with `BAAI/bge-reranker-base` down to the top-5 most relevant chunks.
+  4. **Strict Grounding & Fallback:** System prompt enforces factual synthesis exclusively from retrieved context, returning standard fallback (`"I could not find that information across the uploaded documents."`) when context is insufficient.
 - **Architecture-Aware Grounding:** Explicitly distinguishes actual application runtime architecture from concepts merely taught or discussed in uploaded documents (e.g., preventing false claims about ReAct agents or LangGraph).
 - **Rigorous Evaluation Harness:** Structured LLM-as-a-Judge validation with boolean verdicts, bounded retries, abstention verification, and automated JSON reporting.
 - **Comprehensive Regression Tests:** 28 automated unit tests covering document management, prompt constraints, and evaluation logic.
+- **Conversation-Aware Follow-ups:** A bounded recent chat window is included in retrieval queries so questions such as “what about the second one?” retain context.
+- **Secure Upload Handling:** Filename sanitization, PDF signature checks, configurable size/page limits, and escaped citation rendering.
+- **Page-Level Citations:** Retrieved sources show the originating document and page number when available.
+- **Operational Resilience:** Structured latency/source-count logs, explicit user-facing failures, and a smaller Groq fallback model.
+- **Streaming Answers:** The UI streams generated tokens while preserving source citations.
+- **Optional Workspaces:** Set `APP_PASSWORD` to enable password-protected named workspaces, each with isolated data and ChromaDB directories.
+- **CI Quality Gate:** GitHub Actions compiles the application and runs the complete test suite for every push and pull request.
 
 ---
 
@@ -37,7 +43,7 @@ flowchart TD
     C --> D[ChromaDB Vector Store]
     C --> E[In-Memory BM25 Index]
     
-    F[User Query] --> G[HyDE Query Transformation]
+    F[User Query] -->     G[Query]
     G --> H[Dense Vector Search: top-15]
     G --> I[BM25 Keyword Search: top-15]
     D --> H
@@ -47,7 +53,7 @@ flowchart TD
     I --> J
     J --> K[BAAI/bge-reranker-base: top-5]
     K --> L[Structured Context & Guardrails]
-    L --> M[NVIDIA NIM: openai/gpt-oss-20b]
+    L --> M[Groq: openai/gpt-oss-120b]
     M --> N[Grounded Response + Source Citations]
 ```
 
@@ -59,8 +65,8 @@ flowchart TD
 | :--- | :--- | :--- |
 | **Frontend UI** | Web Interface | Streamlit |
 | **Orchestration** | RAG Framework | LlamaIndex |
-| **Generation LLM** | Remote Inference | NVIDIA NIM API (`openai/gpt-oss-20b`) |
-| **Judge LLM** | Evaluation Judge | NVIDIA NIM API (`openai/gpt-oss-20b`) |
+| **Generation LLM** | Remote Inference | Groq API (`openai/gpt-oss-120b`) |
+| **Judge LLM** | Evaluation Judge | Groq API (`openai/gpt-oss-120b`) |
 | **Embedding Model** | Dense Representation | HuggingFace (`sentence-transformers/all-MiniLM-L6-v2`, 384-dim) |
 | **Vector Store** | Persistent Database | ChromaDB |
 | **Keyword Index** | Sparse Search | BM25 (`llama-index-retrievers-bm25`) |
@@ -107,11 +113,11 @@ pip install -r requirements.txt
 Create a `.env` file in the root directory:
 
 ```env
-NVIDIA_API_KEY=your_nvidia_api_key_here
+GROQ_API_KEY=your_groq_api_key_here
 ```
 
 > [!NOTE]
-> Obtain a free API key from [NVIDIA NIM](https://build.nvidia.com/). Never commit `.env` or expose API keys in public repositories.
+> Obtain an API key from [Groq Console](https://console.groq.com/). Never commit `.env` or expose API keys in public repositories. If a key is exposed, revoke it and create a replacement immediately.
 
 ### 5. Start the application
 
@@ -131,7 +137,7 @@ Run the full unit test suite from the repository root:
 python -m pytest tests/ -v
 ```
 
-**Latest Verified Test Run:** `28 passed in ~34s`
+**Latest Verified Test Run:** `30 passed`
 
 ### Test Coverage Highlights:
 - **`test_document_manager.py`**: Empty knowledge base handling, incremental document additions, hash-based modification replacement, clean removal of chunk embeddings from ChromaDB, and invalid PDF handling.
@@ -166,6 +172,41 @@ python eval.py
 
 *All evaluation traces and diagnostic outputs are saved under `evaluation_results/`.*
 
+## Configuration
+
+The application reads configuration from environment variables or `.env`:
+
+```env
+GROQ_API_KEY=your_groq_api_key_here
+GROQ_MODEL=openai/gpt-oss-120b
+GROQ_FALLBACK_MODEL=openai/gpt-oss-20b
+APP_PASSWORD=optional_shared_workspace_password
+MAX_UPLOAD_BYTES=26214400
+MAX_PDF_PAGES=250
+MAX_CONTEXT_MESSAGES=6
+```
+
+`MAX_UPLOAD_BYTES` defaults to 25 MiB. `MAX_PDF_PAGES` defaults to 250. The API key is never logged or stored in source code.
+
+When `APP_PASSWORD` is configured, users must provide the workspace name and password. Workspace names are hashed into isolated storage paths and are never used directly as filesystem paths. For internet-facing multi-user deployments, replace this lightweight mode with an identity provider and session-backed authorization.
+
+If the interface reports that the language-model provider could not complete a request, first verify that `GROQ_API_KEY` is a newly generated, active key and restart Streamlit. The server log will contain the provider status code and request error without printing the key. A 401/403 indicates credentials, while a 404 indicates an unavailable model name.
+
+## Security and reliability
+
+- Uploaded names are flattened and sanitized before they are used as filesystem paths.
+- Files must have a PDF signature and pass PyMuPDF validation before indexing.
+- Citation filenames and extracted text are HTML-escaped before custom HTML rendering.
+- Retrieved context is sent to Groq for generation; embeddings and the local ChromaDB remain on disk.
+- Network calls use bounded timeouts and retries. If the primary Groq model fails, the request retries once with `openai/gpt-oss-20b`.
+- Responses are streamed in the UI when the provider supports streaming.
+- Errors are logged with stack traces server-side while users receive actionable, non-sensitive messages.
+- The optional workspace password provides basic isolation for controlled deployments; it is not a replacement for OAuth/OIDC, database-backed sessions, or enterprise identity management.
+
+## Production roadmap
+
+For a full production deployment, add authentication, per-user Chroma collections, encrypted storage, rate limiting, a background indexing queue, retention policies, and external metrics/tracing. These controls are deployment concerns and are intentionally not simulated inside the single-user Streamlit app.
+
 ---
 
 ## Project Structure
@@ -183,7 +224,8 @@ rag-pdf-chatbot/
 ├── data/                   # Input PDFs directory (ignored by git)
 ├── chroma_db/              # Persistent ChromaDB vector store (ignored by git)
 ├── evaluation_results/     # Timestamped evaluation reports (JSON)
-├── .env                    # NVIDIA NIM API key (ignored by git)
+├── .github/workflows/ci.yml # Automated compile and test checks
+├── .env                     # Groq API key (ignored by git)                    # Groq API key (ignored by git)
 ├── .gitignore              # Environment and database ignore rules
 └── requirements.txt        # Pinned Python package dependencies
 ```
@@ -192,9 +234,9 @@ rag-pdf-chatbot/
 
 ## Security & Best Practices
 
-- **Zero Credential Exposure:** `.env` and virtual environments (`.venv/`, `venv/`) are excluded via `.gitignore`.
+- **Zero Credential Exposure:** `.env` and virtual environments (`.venv/`, `venv/`) are excluded via `.gitignore`. Use `GROQ_API_KEY`; never place a key in source code.
 - **Fail-Fast Client Timeouts:** Configured 30.0s HTTP client timeout with bounded retries to prevent dead socket hangs.
-- **Data Protection:** Chunks and vector embeddings are stored locally in `./chroma_db` without transmitting raw documents to unverified third parties.
+- **Data Protection:** Chunks and vector embeddings are stored locally in `./chroma_db`; retrieved context is sent to Groq for answer generation.
 
 ---
 
